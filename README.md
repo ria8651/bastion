@@ -4,13 +4,13 @@ Central GitHub-SSO auth service for my self-hosted apps. SvelteKit + SQLite + Dr
 
 ## Status
 
-- ✅ **Phase 1** — GitHub OAuth, sessions, user upsert, whitelist/pending/denied flow
+- ✅ **Phase 1** — GitHub OAuth, sessions, whitelist/pending/denied user states
 - ✅ **Phase 2** — Admin panel: users, access requests, service CRUD, audit log
-- ✅ **First-run setup wizard** — no env-based bootstrap; configure via the UI
-- ⏳ **Phase 3** — RS256 JWT + JWKS + `/api/introspect` so consumer apps can actually verify identity
+- ✅ **Phase 3** — RS256 JWT + JWKS + `/api/introspect` for consumer verification
+- ✅ **First-run setup wizard** — no env-based bootstrap
 - ⏳ **Phase 4** — Fine-grained per-service permissions
 
-## Run
+## Run (dev)
 
 ```bash
 npm install
@@ -22,29 +22,64 @@ Open <http://localhost:5180> → complete the setup wizard (GitHub OAuth creds �
 
 Only env var: `DATABASE_PATH` (default `./data/bastion.db`).
 
+## Run (Docker)
+
+Image is a multi-stage Node build. The container runs `drizzle-kit push` at start, then the SvelteKit node server on port 5180.
+
+Sample `docker-compose.yml` (not tracked here — keep in your own ops config):
+
+```yaml
+services:
+  bastion:
+    build:
+      context: https://github.com/ria8651/bastion.git#main
+    environment:
+      DATABASE_PATH: /data/bastion.db
+      # Must match your public-facing URL so GitHub OAuth redirects are built correctly.
+      ORIGIN: https://auth.yourdomain.com
+      PROTOCOL_HEADER: x-forwarded-proto
+      HOST_HEADER: x-forwarded-host
+    volumes:
+      - bastion_data:/data
+    ports:
+      - "127.0.0.1:5180:5180"
+    restart: unless-stopped
+volumes:
+  bastion_data:
+```
+
+Terminate TLS at nginx/caddy and proxy to `127.0.0.1:5180` with `X-Forwarded-Proto` + `X-Forwarded-Host` set.
+
 ## Integrating a service
 
 Services redirect unauthenticated users to:
 
 ```
-http://localhost:5180/auth/login?service=<slug>&return=<url-back-to-your-app>
+https://auth.yourdomain.com/auth/login?service=<slug>
 ```
 
-Bastion authenticates via GitHub, checks the grant, and redirects back to `return` on success — or to `/pending` if the user needs admin approval. The `return` URL must start with the service's registered `returnUrlPrefix`.
+Bastion authenticates via GitHub, checks the grant, and redirects back to the service's **registered Return URL** with `?bastion_token=<JWT>` appended — or to `/pending` if the user needs admin approval.
 
-**Current caveat**: Phase 3 isn't done, so no token is issued yet. Consumer apps have no way to verify the user's identity — they're just gated on "did bastion let them through". Fine for dev, not for anything real.
+The consumer app:
+
+1. Registers the full return URL (e.g. `https://binkflix.yourdomain.com/auth/bastion`) via bastion's admin panel.
+2. Verifies the token using the JWKS at `/.well-known/jwks.json`, checking `iss`, `aud = <slug>`, and `svc = <slug>`.
+3. Mints its own session cookie and redirects to the app root.
+
+Fresh grant/perm state is available via `GET /api/introspect` with an `Authorization: Bearer <jwt>` header — useful for revocation-sensitive checks that shouldn't wait for JWT expiry.
 
 ## Data model
 
 ```
 users            github-linked accounts, status: active|pending|denied, is_admin flag
-services         registered apps (slug, return_url_prefix)
+services         registered apps (slug, return_url)
 grants           which users can access which services
 permissions      per-service permission keys (unused until phase 4)
 user_perms       fine-grained permission assignments
 sessions         opaque bastion session tokens, sha256-hashed
 access_requests  audit trail for "user X wants into service Y", admin-resolved
 oauth_providers  github client id + secret (managed by setup wizard)
+signing_keys     RS256 keypairs for service-bound JWTs (auto-generated, rotatable)
 audit_log        admin actions
 ```
 
