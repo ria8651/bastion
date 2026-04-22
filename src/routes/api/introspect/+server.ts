@@ -31,8 +31,12 @@ export const GET: RequestHandler = async ({ request, url }) => {
 		);
 	}
 
-	const userId = Number(payload.sub);
-	if (!Number.isFinite(userId)) return json({ active: false, error: 'bad sub' }, { status: 401 });
+	// `sub` is now a stable hash (see identityHash); bastion looks up its own
+	// user row via the non-standard `bastion_uid` claim.
+	const userId = typeof payload.bastion_uid === 'number' ? payload.bastion_uid : NaN;
+	if (!Number.isFinite(userId)) {
+		return json({ active: false, error: 'missing bastion_uid claim' }, { status: 401 });
+	}
 
 	const user = await db.select().from(schema.users).where(eq(schema.users.id, userId)).get();
 	if (!user || user.status !== 'active') {
@@ -78,8 +82,9 @@ export const GET: RequestHandler = async ({ request, url }) => {
 
 	return json({
 		active: true,
-		sub: user.id,
-		login: user.login,
+		sub: payload.sub, // stable identity hash, echoed from the token
+		bastion_uid: user.id,
+		username: user.username,
 		email: user.email,
 		avatar: user.avatar,
 		is_admin: user.isAdmin,

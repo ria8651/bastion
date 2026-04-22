@@ -54,7 +54,8 @@ export const GET: RequestHandler = async (event) => {
 			.insert(schema.users)
 			.values({
 				githubId: gh.id,
-				login: gh.login,
+				// Seed bastion's username from the GitHub login — may be edited later.
+				username: gh.login,
 				email: gh.email,
 				avatar: gh.avatar_url,
 				status: claimAdmin ? 'active' : 'pending',
@@ -70,14 +71,15 @@ export const GET: RequestHandler = async (event) => {
 			actorId: userId,
 			action: claimAdmin ? 'setup.claim_admin' : 'user.signup_pending',
 			target: `user:${userId}`,
-			meta: { login: gh.login }
+			meta: { gh_login: gh.login }
 		});
 	} else {
 		userId = existing.id;
+		// Don't overwrite username on re-login — it's bastion-owned, user may
+		// have edited it. Still refresh provider-supplied bits (email/avatar).
 		await db
 			.update(schema.users)
 			.set({
-				login: gh.login,
 				email: gh.email ?? existing.email,
 				avatar: gh.avatar_url ?? existing.avatar,
 				lastLoginAt: new Date(),
@@ -91,7 +93,7 @@ export const GET: RequestHandler = async (event) => {
 				actorId: userId,
 				action: 'setup.claim_admin',
 				target: `user:${userId}`,
-				meta: { login: gh.login }
+				meta: { gh_login: gh.login }
 			});
 		}
 	}
@@ -165,8 +167,9 @@ export const GET: RequestHandler = async (event) => {
 			if (grant) {
 				const { jwt } = await issueServiceToken({
 					issuer: event.url.origin,
-					userId,
-					login: user.login,
+					userId: user.id,
+					primaryIdentity: { provider: 'github', providerUserId: user.githubId },
+					username: user.username,
 					service: svc.slug
 				});
 				const dest = new URL(svc.returnUrl);

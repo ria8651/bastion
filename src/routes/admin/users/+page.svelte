@@ -26,7 +26,7 @@
 					{#if u.avatar}<img src={u.avatar} alt="" width="24" height="24" style="border-radius:50%" />{/if}
 				</td>
 				<td>
-					<a href="/admin/users/{u.id}">{u.login}</a>
+					<a href="/admin/users/{u.id}">{u.username}</a>
 				</td>
 				<td style="color:#9aa4af">{u.email ?? '—'}</td>
 				<td><span class="pill {statusClass(u.status)}">{u.status}</span></td>

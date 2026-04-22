@@ -25,7 +25,7 @@
 				<tr>
 					<td>
 						{#if row.user}
-							<a href="/admin/users/{row.user.id}">{row.user.login}</a>
+							<a href="/admin/users/{row.user.id}">{row.user.username}</a>
 						{:else}
 							—
 						{/if}
@@ -66,7 +66,7 @@
 		<tbody>
 			{#each data.resolved as row (row.req.id)}
 				<tr>
-					<td>{row.user?.login ?? '—'}</td>
+					<td>{row.user?.username ?? '—'}</td>
 					<td>{row.service?.slug ?? '—'}</td>
 					<td>
 						<span class="pill {row.req.decision === 'approved' ? 'good' : 'bad'}"

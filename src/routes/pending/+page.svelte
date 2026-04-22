@@ -8,7 +8,7 @@
 
 {#if data.user}
 	<p>
-		Hey <strong>{data.user.login}</strong> — your account has been created but isn't active yet.
+		Hey <strong>{data.user.username}</strong> — your account has been created but isn't active yet.
 	</p>
 
 	{#if service}

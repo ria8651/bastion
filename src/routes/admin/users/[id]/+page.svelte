@@ -9,7 +9,7 @@
 <header class="head">
 	{#if data.u.avatar}<img src={data.u.avatar} alt="" />{/if}
 	<div>
-		<h1>{data.u.login}</h1>
+		<h1>{data.u.username}</h1>
 		<div style="color:#9aa4af">{data.u.email ?? 'no email'} · github id {data.u.githubId}</div>
 		<div style="margin-top:0.3rem">
 			<span class="pill {statusClass(data.u.status)}">{data.u.status}</span>

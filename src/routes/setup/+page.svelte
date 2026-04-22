@@ -57,12 +57,21 @@
 			</p>
 			{#if data.signedInAs}
 				<p style="color:#9aa4af">
-					You're currently signed in as <strong>{data.signedInAs.login}</strong> but that account
+					You're currently signed in as <strong>{data.signedInAs.username}</strong> but that account
 					doesn't have admin yet (maybe you signed up before completing this step). Sign in again
 					below to claim it.
 				</p>
 			{/if}
-			<a class="btn primary" href="/auth/login?claim_admin=1">Sign in with GitHub as admin</a>
+			<div class="actions">
+				<a class="btn primary" href="/auth/login?claim_admin=1">Sign in with GitHub as admin</a>
+				<form method="POST" action="?/resetGithub" use:enhance>
+					<button class="btn" type="submit">← Back: re-enter OAuth credentials</button>
+				</form>
+			</div>
+			<p class="hint">
+				If GitHub shows "redirect_uri is not associated with this application" or similar, the
+				client id/secret or callback URL in your GitHub OAuth app is wrong. Go back and fix it.
+			</p>
 		</section>
 	{:else}
 		<section class="card">
@@ -218,6 +227,17 @@
 	.btn.big {
 		padding: 0.55rem 1rem;
 		font-size: 1rem;
+	}
+	.actions {
+		display: flex;
+		gap: 0.6rem;
+		align-items: center;
+		flex-wrap: wrap;
+	}
+	.hint {
+		color: #9aa4af;
+		font-size: 0.85rem;
+		margin-top: 0.9rem;
 	}
 	.err {
 		background: #3a1515;

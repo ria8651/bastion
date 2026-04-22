@@ -5,7 +5,7 @@ declare global {
 				| {
 						id: number;
 						githubId: number;
-						login: string;
+						username: string;
 						email: string | null;
 						avatar: string | null;
 						status: 'active' | 'pending' | 'denied';

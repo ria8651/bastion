@@ -8,7 +8,7 @@
 		{#if data.user}
 			<span class="who">
 				{#if data.user.avatar}<img src={data.user.avatar} alt="" />{/if}
-				{data.user.login}
+				{data.user.username}
 				{#if data.user.isAdmin}<span class="tag">admin</span>{/if}
 				{#if data.user.status !== 'active'}<span class="tag warn">{data.user.status}</span>{/if}
 			</span>

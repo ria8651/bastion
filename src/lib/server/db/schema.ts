@@ -6,7 +6,13 @@ export const users = sqliteTable(
 	{
 		id: integer('id').primaryKey({ autoIncrement: true }),
 		githubId: integer('github_id').notNull(),
-		login: text('login').notNull(),
+		/**
+		 * Bastion-owned display name. Seeded from the GitHub login at signup; may
+		 * be edited later (admin panel / self-service) and should be treated as
+		 * authoritative by consumer apps. Keep `githubId` as the provider-stable
+		 * key; use `username` for UI + JWTs.
+		 */
+		username: text('username').notNull(),
 		email: text('email'),
 		avatar: text('avatar'),
 		status: text('status', { enum: ['active', 'pending', 'denied'] })
@@ -20,7 +26,7 @@ export const users = sqliteTable(
 	},
 	(t) => ({
 		githubIdx: uniqueIndex('users_github_id_idx').on(t.githubId),
-		loginIdx: uniqueIndex('users_login_idx').on(t.login)
+		usernameIdx: uniqueIndex('users_username_idx').on(t.username)
 	})
 );
 

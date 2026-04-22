@@ -12,7 +12,7 @@
 {:else if data.user.status === 'denied'}
 	<p>Access denied.</p>
 {:else}
-	<p>You're signed in as <strong>{data.user.login}</strong>.</p>
+	<p>You're signed in as <strong>{data.user.username}</strong>.</p>
 	{#if data.user.isAdmin}
 		<p><a href="/admin">Open admin panel →</a></p>
 	{/if}

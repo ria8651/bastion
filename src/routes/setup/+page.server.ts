@@ -45,6 +45,16 @@ export const actions: Actions = {
 		return { ok: true };
 	},
 
+	// Back from step 2 → step 1: clear GitHub creds so the user can re-enter
+	// them (useful when the claim-admin OAuth roundtrip failed due to a typo
+	// or a callback-URL mismatch in the GitHub app settings).
+	resetGithub: async () => {
+		const setup = await getSetupState();
+		if (setup.hasAdmin) return fail(400, { error: "can't reset creds after an admin has been claimed" });
+		await db.delete(schema.oauthProviders).where(eq(schema.oauthProviders.provider, 'github'));
+		return { ok: true };
+	},
+
 	addService: async (event) => {
 		const form = await event.request.formData();
 		const slug = String(form.get('slug') ?? '').trim();

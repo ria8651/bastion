@@ -14,7 +14,7 @@ export const handle: Handle = async ({ event, resolve }) => {
 			event.locals.user = {
 				id: row.user.id,
 				githubId: row.user.githubId,
-				login: row.user.login,
+				username: row.user.username,
 				email: row.user.email,
 				avatar: row.user.avatar,
 				status: row.user.status,
