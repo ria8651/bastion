@@ -76,7 +76,7 @@
 					<thead>
 						<tr>
 							<th>Slug</th>
-							<th>Return URL prefix</th>
+							<th>Return URL</th>
 							<th></th>
 						</tr>
 					</thead>
@@ -84,7 +84,7 @@
 						{#each data.services as s (s.id)}
 							<tr>
 								<td><code>{s.slug}</code></td>
-								<td style="color:#9aa4af"><code>{s.returnUrlPrefix}</code></td>
+								<td style="color:#9aa4af"><code>{s.returnUrl}</code></td>
 								<td>
 									<form method="POST" action="?/removeService" use:enhance>
 										<input type="hidden" name="id" value={s.id} />
@@ -107,10 +107,10 @@
 					<input name="name" placeholder="Boom" />
 				</label>
 				<label class="wide">
-					Return URL prefix
+					Return URL
 					<input
-						name="returnUrlPrefix"
-						placeholder="http://localhost:5173"
+						name="returnUrl"
+						placeholder="http://localhost:5173/auth/bastion"
 						required
 						type="url"
 					/>

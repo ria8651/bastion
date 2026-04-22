@@ -23,18 +23,18 @@ export const load: PageServerLoad = async () => {
 
 function validate(
 	form: FormData
-): { ok: true; slug: string; name: string; returnUrlPrefix: string } | { ok: false; error: string } {
+): { ok: true; slug: string; name: string; returnUrl: string } | { ok: false; error: string } {
 	const slug = String(form.get('slug') ?? '').trim();
 	const name = String(form.get('name') ?? '').trim() || slug;
-	const returnUrlPrefix = String(form.get('returnUrlPrefix') ?? '').trim();
-	if (!slug || !returnUrlPrefix) return { ok: false, error: 'slug and return url required' };
+	const returnUrl = String(form.get('returnUrl') ?? '').trim();
+	if (!slug || !returnUrl) return { ok: false, error: 'slug and return url required' };
 	if (!/^[a-z0-9-]+$/.test(slug)) return { ok: false, error: 'slug must be lowercase alphanumeric + dashes' };
 	try {
-		new URL(returnUrlPrefix);
+		new URL(returnUrl);
 	} catch {
 		return { ok: false, error: 'return url must be a valid URL' };
 	}
-	return { ok: true, slug, name, returnUrlPrefix };
+	return { ok: true, slug, name, returnUrl };
 }
 
 export const actions: Actions = {
@@ -46,7 +46,7 @@ export const actions: Actions = {
 
 		const inserted = await db
 			.insert(schema.services)
-			.values({ slug: v.slug, name: v.name, returnUrlPrefix: v.returnUrlPrefix })
+			.values({ slug: v.slug, name: v.name, returnUrl: v.returnUrl })
 			.onConflictDoNothing()
 			.returning({ id: schema.services.id })
 			.get();
@@ -71,7 +71,7 @@ export const actions: Actions = {
 
 		await db
 			.update(schema.services)
-			.set({ slug: v.slug, name: v.name, returnUrlPrefix: v.returnUrlPrefix })
+			.set({ slug: v.slug, name: v.name, returnUrl: v.returnUrl })
 			.where(eq(schema.services.id, id));
 		await audit(admin.id, 'service.update', `service:${id}`, { slug: v.slug });
 		return { ok: true };

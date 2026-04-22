@@ -30,7 +30,7 @@ export const services = sqliteTable(
 		id: integer('id').primaryKey({ autoIncrement: true }),
 		slug: text('slug').notNull(),
 		name: text('name').notNull(),
-		returnUrlPrefix: text('return_url_prefix').notNull(),
+		returnUrl: text('return_url').notNull(),
 		createdAt: integer('created_at', { mode: 'timestamp' })
 			.notNull()
 			.default(sql`(unixepoch())`)
@@ -166,6 +166,22 @@ export const oauthProviders = sqliteTable(
 			.default(sql`(unixepoch())`)
 	}
 );
+
+/**
+ * RS256 keypairs for signing service-bound JWTs. Keys are generated lazily
+ * on first use and never deleted (retired instead) so tokens in flight stay
+ * verifiable via JWKS during key rotation.
+ */
+export const signingKeys = sqliteTable('signing_keys', {
+	kid: text('kid').primaryKey(),
+	alg: text('alg').notNull().default('RS256'),
+	publicJwk: text('public_jwk', { mode: 'json' }).notNull(),
+	privateJwk: text('private_jwk', { mode: 'json' }).notNull(),
+	createdAt: integer('created_at', { mode: 'timestamp' })
+		.notNull()
+		.default(sql`(unixepoch())`),
+	retiredAt: integer('retired_at', { mode: 'timestamp' })
+});
 
 export type User = typeof users.$inferSelect;
 export type Service = typeof services.$inferSelect;

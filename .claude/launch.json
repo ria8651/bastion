@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "bastion",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 5180
+    },
+    {
+      "name": "boom",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "../boom", "run", "dev"],
+      "port": 3000
+    },
+    {
+      "name": "binkflix",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "cd ../binkflix && dx serve --fullstack --port 9356"],
+      "port": 9356
+    }
+  ]
+}

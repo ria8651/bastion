@@ -49,23 +49,23 @@ export const actions: Actions = {
 		const form = await event.request.formData();
 		const slug = String(form.get('slug') ?? '').trim();
 		const name = String(form.get('name') ?? '').trim() || slug;
-		const returnUrlPrefix = String(form.get('returnUrlPrefix') ?? '').trim();
-		if (!slug || !returnUrlPrefix) {
-			return fail(400, { error: 'slug and return url prefix required', slug, returnUrlPrefix });
+		const returnUrl = String(form.get('returnUrl') ?? '').trim();
+		if (!slug || !returnUrl) {
+			return fail(400, { error: 'slug and return url required', slug, returnUrl });
 		}
 		if (!/^[a-z0-9-]+$/.test(slug)) {
 			return fail(400, { error: 'slug must be lowercase alphanumeric + dashes', slug });
 		}
 		try {
-			new URL(returnUrlPrefix);
+			new URL(returnUrl);
 		} catch {
-			return fail(400, { error: 'return url must be a valid URL', slug, returnUrlPrefix });
+			return fail(400, { error: 'return url must be a valid URL', slug, returnUrl });
 		}
 
 		// Grant this new service to the current admin automatically.
 		const result = await db
 			.insert(schema.services)
-			.values({ slug, name, returnUrlPrefix })
+			.values({ slug, name, returnUrl })
 			.onConflictDoNothing()
 			.returning({ id: schema.services.id })
 			.get();

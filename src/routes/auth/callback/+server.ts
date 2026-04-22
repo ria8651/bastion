@@ -6,6 +6,7 @@ import { db, schema } from '$lib/server/db';
 import { github, fetchGithubUser } from '$lib/server/github';
 import { readOAuthStateCookie, clearOAuthStateCookie } from '$lib/server/oauthState';
 import { createSession, generateSessionToken, setSessionCookie } from '$lib/server/session';
+import { issueServiceToken } from '$lib/server/jwt';
 
 export const GET: RequestHandler = async (event) => {
 	const code = event.url.searchParams.get('code');
@@ -124,7 +125,7 @@ export const GET: RequestHandler = async (event) => {
 					await db.insert(schema.accessRequests).values({
 						userId,
 						serviceId: svc.id,
-						note: `Requested via login redirect from ${stored.returnTo ?? svc.slug}`
+						note: `Requested via login redirect from ${svc.slug}`
 					});
 				}
 			}
@@ -147,8 +148,9 @@ export const GET: RequestHandler = async (event) => {
 
 	if (user.status === 'pending') throw redirect(303, '/pending');
 
-	// Active user arriving via service redirect.
-	if (stored.service && stored.returnTo) {
+	// Active user arriving via service redirect — send them to the service's
+	// registered returnUrl with a signed token attached.
+	if (stored.service) {
 		const svc = await db
 			.select()
 			.from(schema.services)
@@ -160,7 +162,17 @@ export const GET: RequestHandler = async (event) => {
 				.from(schema.grants)
 				.where(and(eq(schema.grants.userId, userId), eq(schema.grants.serviceId, svc.id)))
 				.get();
-			if (grant) throw redirect(303, stored.returnTo);
+			if (grant) {
+				const { jwt } = await issueServiceToken({
+					issuer: event.url.origin,
+					userId,
+					login: user.login,
+					service: svc.slug
+				});
+				const dest = new URL(svc.returnUrl);
+				dest.searchParams.set('bastion_token', jwt);
+				throw redirect(303, dest.toString());
+			}
 			throw redirect(303, `/pending?service=${encodeURIComponent(svc.slug)}`);
 		}
 	}

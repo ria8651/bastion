@@ -6,7 +6,6 @@ const TTL_SECONDS = 10 * 60;
 export type OAuthState = {
 	state: string;
 	service: string | null;
-	returnTo: string | null;
 	/** If true, the returning user becomes the first admin (setup wizard only). */
 	claimAdmin?: boolean;
 };

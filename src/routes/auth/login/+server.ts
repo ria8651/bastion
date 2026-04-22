@@ -1,15 +1,14 @@
 import type { RequestHandler } from './$types';
-import { redirect } from '@sveltejs/kit';
+import { error, redirect } from '@sveltejs/kit';
 import { generateState } from 'arctic';
 import { github } from '$lib/server/github';
 import { setOAuthStateCookie } from '$lib/server/oauthState';
 import { db, schema } from '$lib/server/db';
 import { getSetupState } from '$lib/server/config';
-import { count, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 
 export const GET: RequestHandler = async (event) => {
 	const service = event.url.searchParams.get('service');
-	const returnTo = event.url.searchParams.get('return');
 	const claimAdminFlag = event.url.searchParams.get('claim_admin') === '1';
 
 	// "claim_admin" is only honored while setup is incomplete AND no admin exists yet.
@@ -25,9 +24,8 @@ export const GET: RequestHandler = async (event) => {
 			.from(schema.services)
 			.where(eq(schema.services.slug, service))
 			.get();
-		if (!row) throw redirect(303, '/?error=unknown_service');
-		if (returnTo && !returnTo.startsWith(row.returnUrlPrefix)) {
-			throw redirect(303, '/?error=bad_return_url');
+		if (!row) {
+			throw error(400, `Unknown service "${service}". Register it at /admin/services.`);
 		}
 	}
 
@@ -35,6 +33,6 @@ export const GET: RequestHandler = async (event) => {
 	const client = await github(event.url.origin);
 	const url = client.createAuthorizationURL(state, ['read:user', 'user:email']);
 
-	setOAuthStateCookie(event, { state, service, returnTo, claimAdmin });
+	setOAuthStateCookie(event, { state, service, claimAdmin });
 	throw redirect(303, url.toString());
 };

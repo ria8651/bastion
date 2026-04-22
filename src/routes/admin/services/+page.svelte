@@ -17,7 +17,7 @@
 		<tr>
 			<th>Slug</th>
 			<th>Name</th>
-			<th>Return URL prefix</th>
+			<th>Return URL</th>
 			<th>Users</th>
 			<th></th>
 		</tr>
@@ -27,7 +27,7 @@
 			<tr>
 				<td><code>{s.slug}</code></td>
 				<td>{s.name}</td>
-				<td style="color:#9aa4af"><code>{s.returnUrlPrefix}</code></td>
+				<td style="color:#9aa4af"><code>{s.returnUrl}</code></td>
 				<td>{s.userCount}</td>
 				<td class="row-actions">
 					<button class="btn" type="button" onclick={() => (editingId = s.id)}>Edit</button>
@@ -73,8 +73,8 @@
 				<input name="name" value={editing.name} />
 			</label>
 			<label class="wide">
-				Return URL prefix
-				<input name="returnUrlPrefix" value={editing.returnUrlPrefix} required type="url" />
+				Return URL
+				<input name="returnUrl" value={editing.returnUrl} required type="url" />
 			</label>
 			<div class="wide row-actions">
 				<button class="btn primary" type="submit">Save</button>
@@ -96,8 +96,8 @@
 			<input name="name" placeholder="Boom" />
 		</label>
 		<label class="wide">
-			Return URL prefix
-			<input name="returnUrlPrefix" placeholder="http://localhost:5173" required type="url" />
+			Return URL
+			<input name="returnUrl" placeholder="http://localhost:5173/auth/bastion" required type="url" />
 		</label>
 		<button class="btn primary wide" type="submit">Add</button>
 	</form>
