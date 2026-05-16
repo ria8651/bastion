@@ -582,6 +582,9 @@ async fn link_identity_and_redirect(
     if current_user.id != link_uid {
         return Err(AppError::Forbidden);
     }
+    if current_user.status == "denied" {
+        return Err(AppError::Forbidden);
+    }
 
     // Is this provider identity already attached to someone?
     let existing: Option<(i64,)> = sqlx::query_as(

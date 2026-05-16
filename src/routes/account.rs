@@ -108,10 +108,13 @@ pub async fn page(
                                 @if let Some(e) = email { " · " (e) }
                             }
                         }
-                        @if user.sub_anchor_provider == *prov && user.sub_anchor_provider_id == *pid {
+                        @let is_anchor = user.sub_anchor_provider == *prov && user.sub_anchor_provider_id == *pid;
+                        @if is_anchor {
                             (pill("admin", "sub anchor"))
                         }
-                        @if identities.len() > 1 {
+                        @if is_anchor {
+                            span.mono style="font-size:11px;color:var(--fg-dim)" { "anchor — can't unlink" }
+                        } @else if identities.len() > 1 {
                             form method="post" action="/account/unlink" style="margin:0" {
                                 input type="hidden" name="identity_id" value=(iid);
                                 button.btn.danger type="submit" { "Unlink" }
@@ -172,6 +175,9 @@ pub async fn link_post(
     let Some(Extension(user)) = user else {
         return Err(AppError::Unauthorized);
     };
+    if user.status == "denied" {
+        return Err(AppError::Forbidden);
+    }
     let provider = Provider::parse(&f.provider)
         .ok_or_else(|| AppError::BadRequest("unknown provider".into()))?;
     let cfg = get_oauth_config(&state.pool, provider.as_str())
@@ -235,6 +241,16 @@ pub async fn unlink_post(
     };
     if uid != user.id {
         return Err(AppError::Forbidden);
+    }
+
+    // The sub-anchor row defines the downstream JWT `sub`. Deleting it frees
+    // the (provider, provider_id) pair so a future signup using that same
+    // external account would land on an identical `sub` — i.e., would be
+    // treated as this user by downstream services. Refuse.
+    if provider == user.sub_anchor_provider && provider_id == user.sub_anchor_provider_id {
+        return Err(AppError::BadRequest(
+            "can't unlink the sub-anchor identity — your downstream id depends on it".into(),
+        ));
     }
 
     let (remaining,): (i64,) =
