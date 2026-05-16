@@ -1,0 +1,116 @@
+mod audit;
+mod db;
+mod error;
+mod jwt;
+mod keys;
+mod middleware;
+mod models;
+mod oauth;
+mod routes;
+mod session;
+mod setup;
+mod state;
+mod templates;
+
+use std::net::SocketAddr;
+
+use axum::{
+    middleware as axmw,
+    routing::{get, post},
+    Router,
+};
+use tower_cookies::CookieManagerLayer;
+use tower_http::trace::TraceLayer;
+
+use crate::state::AppState;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,sqlx=warn,tower_http=info")),
+        )
+        .init();
+
+    let database_path =
+        std::env::var("DATABASE_PATH").unwrap_or_else(|_| "./data/bastion.db".to_string());
+    let origin = std::env::var("ORIGIN").ok().filter(|s| !s.is_empty());
+    let port: u16 = std::env::var("PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5180);
+
+    tracing::info!(db = %database_path, "connecting to sqlite");
+    let pool = db::connect(&database_path).await?;
+    let state = AppState { pool, origin };
+
+    let app = Router::new()
+        // public
+        .route("/", get(routes::home::index))
+        .route("/pending", get(routes::home::pending))
+        .route("/denied", get(routes::home::denied))
+        // auth
+        .route(
+            "/auth/login",
+            get(routes::auth::login_page).post(routes::auth::login_post),
+        )
+        .route("/auth/callback", get(routes::auth::callback))
+        .route("/auth/logout", post(routes::auth::logout))
+        // setup
+        .route("/setup", get(routes::setup::page))
+        .route("/setup/save-github", post(routes::setup::save_github))
+        .route("/setup/reset-github", post(routes::setup::reset_github))
+        .route("/setup/add-service", post(routes::setup::add_service))
+        .route("/setup/remove-service", post(routes::setup::remove_service))
+        .route("/setup/finish", post(routes::setup::finish))
+        // admin
+        .route("/admin", get(routes::admin::overview))
+        .route("/admin/requests", get(routes::admin::requests_page))
+        .route(
+            "/admin/requests/approve",
+            post(routes::admin::approve_request),
+        )
+        .route("/admin/requests/deny", post(routes::admin::deny_request))
+        .route("/admin/users", get(routes::admin::users_page))
+        .route("/admin/users/set-status", post(routes::admin::set_status))
+        .route("/admin/users/set-admin", post(routes::admin::set_admin))
+        .route("/admin/users/:id", get(routes::admin::user_detail))
+        .route(
+            "/admin/users/:id/toggle-grant",
+            post(routes::admin::toggle_grant),
+        )
+        .route(
+            "/admin/users/:id/revoke-sessions",
+            post(routes::admin::revoke_sessions),
+        )
+        .route("/admin/services", get(routes::admin::services_page))
+        .route("/admin/services/add", post(routes::admin::add_service))
+        .route(
+            "/admin/services/update",
+            post(routes::admin::update_service),
+        )
+        .route(
+            "/admin/services/remove",
+            post(routes::admin::remove_service),
+        )
+        // public api
+        .route("/.well-known/jwks.json", get(routes::jwks::jwks))
+        .route("/api/introspect", get(routes::introspect::introspect))
+        // middleware
+        .layer(axmw::from_fn_with_state(state.clone(), middleware::setup_gate))
+        .layer(axmw::from_fn_with_state(state.clone(), middleware::load_user))
+        .layer(CookieManagerLayer::new())
+        .layer(TraceLayer::new_for_http())
+        .with_state(state);
+
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    tracing::info!(%addr, "bastion listening");
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
+    Ok(())
+}

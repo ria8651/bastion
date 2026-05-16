@@ -1,0 +1,147 @@
+:root {
+  --bg: #0f1115;
+  --fg: #e6e8eb;
+  --muted: #9aa4af;
+  --link: #7cb7ff;
+  --border: #23262d;
+  --panel: #15171c;
+  --panel2: #1a1d23;
+  --good-bg: #1a4a2a;
+  --good-fg: #a8e7b6;
+  --warn-bg: #5a3a1a;
+  --warn-fg: #f0c389;
+  --bad-bg: #5a1a1a;
+  --bad-fg: #f0a0a0;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  margin: 0;
+  padding: 0;
+  line-height: 1.5;
+}
+
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+main { max-width: 960px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
+
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 1rem; padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.brand { font-weight: 700; letter-spacing: 0.5px; color: var(--fg); }
+.topnav { display: flex; align-items: center; gap: 0.75rem; }
+.username { font-weight: 600; }
+.avatar { width: 28px; height: 28px; border-radius: 50%; vertical-align: middle; }
+
+.pill {
+  display: inline-block;
+  padding: 2px 8px; border-radius: 999px;
+  font-size: 0.78rem; font-weight: 600;
+  background: var(--panel2); color: var(--muted);
+  border: 1px solid var(--border);
+}
+.pill.good { background: var(--good-bg); color: var(--good-fg); border-color: transparent; }
+.pill.warn { background: var(--warn-bg); color: var(--warn-fg); border-color: transparent; }
+.pill.bad  { background: var(--bad-bg);  color: var(--bad-fg);  border-color: transparent; }
+
+.btn {
+  display: inline-block;
+  padding: 0.4rem 0.8rem;
+  background: var(--panel2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+  cursor: pointer;
+}
+.btn:hover { background: #20242c; text-decoration: none; }
+.btn.primary { background: #1d3a66; border-color: #2a4a7c; color: #cfe1ff; }
+.btn.primary:hover { background: #234a82; }
+.btn.danger  { background: #4a1d1d; border-color: #6a2a2a; color: #f4cfcf; }
+.btn.danger:hover  { background: #5d2222; }
+
+input, textarea, select {
+  font: inherit;
+  background: #0c0e12;
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.45rem 0.6rem;
+  width: 100%;
+}
+
+label { display: block; margin: 0.75rem 0 0.35rem; font-size: 0.9rem; color: var(--muted); }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.25rem;
+  margin: 1rem 0;
+}
+
+.stack { display: flex; flex-direction: column; gap: 0.75rem; }
+.row   { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.muted { color: var(--muted); }
+.error { color: #f0a0a0; background: var(--bad-bg); padding: 0.5rem 0.75rem; border-radius: 6px; }
+
+.admin-tabs {
+  display: flex; gap: 0.25rem; margin: 0 0 1.25rem;
+  border-bottom: 1px solid var(--border);
+}
+.admin-tab {
+  padding: 0.5rem 0.9rem;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+}
+.admin-tab.active { color: var(--fg); border-bottom-color: var(--link); }
+
+.admin-table { width: 100%; border-collapse: collapse; }
+.admin-table th, .admin-table td {
+  padding: 0.55rem 0.7rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: middle;
+}
+.admin-table th { color: var(--muted); font-weight: 600; font-size: 0.85rem; }
+.admin-table tr:hover td { background: rgba(255,255,255,0.02); }
+
+.row-actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+.stat {
+  display: block;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem;
+  color: var(--fg);
+}
+.stat:hover { background: #181b21; text-decoration: none; }
+.stat .n   { font-size: 1.6rem; font-weight: 700; }
+.stat .lbl { color: var(--muted); font-size: 0.85rem; }
+
+.progress { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+.progress .step {
+  flex: 1; padding: 0.5rem 0.75rem;
+  background: var(--panel2);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.progress .step.active { background: var(--link); color: #06121e; }
+.progress .step.done   { background: var(--good-bg); color: var(--good-fg); }

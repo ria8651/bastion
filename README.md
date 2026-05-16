@@ -1,6 +1,6 @@
 # bastion
 
-Central GitHub-SSO auth service for my self-hosted apps. SvelteKit + SQLite + Drizzle.
+Central GitHub-SSO auth service for my self-hosted apps. axum + sqlx (SQLite) + maud + htmx, single static binary.
 
 ## Status
 
@@ -13,20 +13,23 @@ Central GitHub-SSO auth service for my self-hosted apps. SvelteKit + SQLite + Dr
 ## Run (dev)
 
 ```bash
-npm install
-npm run db:push
-npm run dev
+cargo run
 ```
 
-Open <http://localhost:5180> → complete the setup wizard (GitHub OAuth creds → claim admin → add services).
+Open <http://localhost:5180> → complete the setup wizard (GitHub OAuth creds → claim admin → add services). The binary creates the SQLite file and applies its schema (`CREATE TABLE IF NOT EXISTS …`) on startup — no migrations.
 
-Only env var: `DATABASE_PATH` (default `./data/bastion.db`).
+## Env vars
+
+| Var | Default | Purpose |
+|---|---|---|
+| `DATABASE_PATH` | `./data/bastion.db` | SQLite file path |
+| `ORIGIN` | (derived from request headers) | Public-facing URL, e.g. `https://auth.example.com`. Set behind a reverse proxy if it doesn't forward `X-Forwarded-{Host,Proto}`. |
+| `PORT` | `5180` | Listen port |
+| `RUST_LOG` | `info,sqlx=warn,tower_http=info` | Tracing filter |
 
 ## Run (Docker)
 
-Image is a multi-stage Node build. The container runs `drizzle-kit push` at start, then the SvelteKit node server on port 5180.
-
-Sample `docker-compose.yml` (not tracked here — keep in your own ops config):
+Multi-stage build → ~10 MB image with a single static binary inside.
 
 ```yaml
 services:
@@ -35,10 +38,7 @@ services:
       context: https://github.com/ria8651/bastion.git#main
     environment:
       DATABASE_PATH: /data/bastion.db
-      # Must match your public-facing URL so GitHub OAuth redirects are built correctly.
       ORIGIN: https://auth.yourdomain.com
-      PROTOCOL_HEADER: x-forwarded-proto
-      HOST_HEADER: x-forwarded-host
     volumes:
       - bastion_data:/data
     ports:
@@ -48,7 +48,7 @@ volumes:
   bastion_data:
 ```
 
-Terminate TLS at nginx/caddy and proxy to `127.0.0.1:5180` with `X-Forwarded-Proto` + `X-Forwarded-Host` set.
+Terminate TLS at nginx/Caddy and proxy to `127.0.0.1:5180` with `X-Forwarded-Proto` + `X-Forwarded-Host` set (or pin `ORIGIN` explicitly).
 
 ## Integrating a service
 
@@ -58,7 +58,7 @@ Services redirect unauthenticated users to:
 https://auth.yourdomain.com/auth/login?service=<slug>
 ```
 
-Bastion authenticates via GitHub, checks the grant, and redirects back to the service's **registered Return URL** with `?bastion_token=<JWT>` appended — or to `/pending` if the user needs admin approval.
+bastion authenticates via GitHub, checks the grant, and redirects back to the service's **registered Return URL** with `?bastion_token=<JWT>` appended — or to `/pending` if the user needs admin approval.
 
 The consumer app:
 
@@ -83,14 +83,36 @@ signing_keys     RS256 keypairs for service-bound JWTs (auto-generated, rotatabl
 audit_log        admin actions
 ```
 
-## Dev workflow
+## Source layout
 
-No migrations during early dev:
-
-```bash
-npm run db:push    # sync schema
-npm run db:wipe    # start fresh (back to setup wizard)
-npm run db:studio  # inspect
+```
+src/
+  main.rs           router + middleware + listener
+  state.rs          AppState, origin/secure helpers
+  error.rs          AppError -> HTML error page
+  db.rs             sqlite pool + CREATE-IF-NOT-EXISTS bootstrap
+  models.rs         User, Service, UserCtx, ...
+  session.rs        token gen, sha256 store, sliding renewal
+  oauth.rs          GitHub OAuth (authorize URL, code exchange, /user fetch)
+  keys.rs           RS256 keypair gen, JWK persistence
+  jwt.rs            identity_hash, issue_service_token, verify_service_token
+  audit.rs          audit_log insert helper
+  setup.rs          setup-state derivation + oauth_providers CRUD
+  middleware.rs     load_user, setup_gate, require_admin
+  templates.rs      maud layout + admin_layout + status_pill
+  routes/
+    home.rs         GET /, /pending, /denied
+    auth.rs         /auth/login (GET+POST), /auth/callback, /auth/logout
+    setup.rs        /setup wizard + actions
+    admin.rs        /admin/* (overview, requests, users, services + actions)
+    jwks.rs         /.well-known/jwks.json
+    introspect.rs   /api/introspect
+static/
+  style.css         inlined into pages via include_str!
 ```
 
-Wipe the DB on breaking schema changes.
+## Templating
+
+Pages are async handlers that return `maud::Markup`. Layouts compose via plain function calls — `templates::layout(title, user, body)` or `templates::admin_layout(title, tab, user, body)`. No `.html` files, no template inheritance, no client-side framework.
+
+`<body hx-boost="true">` makes all links + forms XHR-driven swaps of the body; the server still does full server-side rendering on every request. Mutation handlers do their work and return `303 See Other` to the relevant GET page; the browser re-fetches it. No JSON API for the UI.
