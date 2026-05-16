@@ -12,10 +12,11 @@ use crate::audit::audit;
 use crate::error::{AppError, AppResult};
 use crate::middleware::require_admin;
 use crate::models::UserCtx;
+use crate::setup::{clear_oauth_config, set_oauth_config};
 use crate::state::{origin_from, AppState};
 use crate::templates::{
-    admin_header, admin_shell, github_svg, host_from_origin, pill, status_pill, AdminCounts,
-    AdminTab,
+    admin_header, admin_shell, host_from_origin, pill, provider_display_name, provider_icon,
+    status_pill, AdminCounts, AdminTab,
 };
 
 fn fmt_time(unix: i64) -> String {
@@ -79,22 +80,42 @@ pub async fn users_page(
     let host = host_from_origin(&origin_from(&state, &headers)).to_string();
     let counts = load_counts(&state).await?;
 
-    let rows: Vec<(i64, Option<String>, String, Option<String>, String, bool, Option<i64>, i64)> =
-        sqlx::query_as(
-            "SELECT u.id, u.avatar, u.username, u.email, u.status, u.is_admin, u.last_login_at,
-                    (SELECT COUNT(*) FROM grants g WHERE g.user_id = u.id) AS svc_count
-             FROM users u ORDER BY u.created_at DESC",
-        )
-        .fetch_all(&state.pool)
-        .await?;
+    let rows: Vec<(
+        i64,
+        Option<String>,
+        String,
+        Option<String>,
+        String,
+        bool,
+        Option<i64>,
+        i64,
+        Option<String>,
+    )> = sqlx::query_as(
+        "SELECT u.id, u.avatar, u.username, u.email, u.status, u.is_admin, u.last_login_at,
+                (SELECT COUNT(*) FROM grants g WHERE g.user_id = u.id) AS svc_count,
+                (SELECT GROUP_CONCAT(DISTINCT ui.provider)
+                   FROM user_identities ui WHERE ui.user_id = u.id) AS providers
+         FROM users u ORDER BY u.created_at DESC",
+    )
+    .fetch_all(&state.pool)
+    .await?;
 
     let total = rows.len();
-    let meta = format!("{} total · 1 provider", total);
+    let (provider_count,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM oauth_providers WHERE enabled = 1")
+            .fetch_one(&state.pool)
+            .await?;
+    let meta = format!(
+        "{} total · {} provider{}",
+        total,
+        provider_count,
+        if provider_count == 1 { "" } else { "s" }
+    );
 
     let body = html! {
         (admin_header("Users", Some(&meta), None))
         p.admin-desc {
-            "Linked accounts. Each user is bound to the identity provider they first signed in with."
+            "Linked accounts. Each user can sign in via one or more identity providers."
         }
         div.filter-row {
             input.input.mono style="width:280px" placeholder="filter user…";
@@ -114,7 +135,7 @@ pub async fn users_page(
                     }
                 }
                 tbody {
-                    @for (id, avatar_url, username, email, status, is_admin, last, svc_count) in &rows {
+                    @for (id, avatar_url, username, email, status, is_admin, last, svc_count, providers) in &rows {
                         tr {
                             td {
                                 a href=(format!("/admin/users/{}", id)) style="display:flex;align-items:center;gap:12px;color:var(--fg)" {
@@ -134,9 +155,15 @@ pub async fn users_page(
                                 }
                             }
                             td {
-                                span style="display:inline-flex;align-items:center;gap:8px;color:var(--fg-mid)" {
-                                    span style="width:14px;height:14px;display:inline-flex" { (github_svg()) }
-                                    span.mono style="font-size:12px" { "github" }
+                                span style="display:inline-flex;align-items:center;gap:6px;color:var(--fg-mid)" {
+                                    @for p in providers.as_deref().unwrap_or("").split(',').filter(|p| !p.is_empty()) {
+                                        span title=(p) style="width:14px;height:14px;display:inline-flex" {
+                                            (provider_icon(p))
+                                        }
+                                    }
+                                    @if providers.as_deref().unwrap_or("").is_empty() {
+                                        span.mono style="font-size:12px;color:var(--fg-dim)" { "—" }
+                                    }
                                 }
                             }
                             td { (status_pill(status)) }
@@ -262,17 +289,48 @@ pub async fn user_detail(
     let host = host_from_origin(&origin_from(&state, &headers)).to_string();
     let counts = load_counts(&state).await?;
 
-    let u: Option<(i64, i64, String, Option<String>, Option<String>, String, bool, i64, Option<i64>)> =
-        sqlx::query_as(
-            "SELECT id, github_id, username, email, avatar, status, is_admin, created_at, last_login_at
-             FROM users WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await?;
-    let Some((uid, gh, uname, email, avatar_url, status, is_admin, _created, last)) = u else {
+    let u: Option<(
+        i64,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        bool,
+        i64,
+        Option<i64>,
+        String,
+        String,
+    )> = sqlx::query_as(
+        "SELECT id, username, email, avatar, status, is_admin, created_at, last_login_at,
+                sub_anchor_provider, sub_anchor_provider_id
+         FROM users WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((
+        uid,
+        uname,
+        email,
+        avatar_url,
+        status,
+        is_admin,
+        _created,
+        last,
+        sub_anchor_provider,
+        sub_anchor_provider_id,
+    )) = u
+    else {
         return Err(AppError::NotFound);
     };
+
+    let identities: Vec<(i64, String, String, Option<String>, i64, Option<i64>)> = sqlx::query_as(
+        "SELECT id, provider, provider_id, email, linked_at, last_login_at
+         FROM user_identities WHERE user_id = ? ORDER BY linked_at",
+    )
+    .bind(uid)
+    .fetch_all(&state.pool)
+    .await?;
 
     let services: Vec<(i64, String, String, bool)> = sqlx::query_as(
         "SELECT s.id, s.slug, s.name,
@@ -301,8 +359,9 @@ pub async fn user_detail(
     .await?;
 
     let meta = format!(
-        "github_id={} · {}",
-        gh,
+        "sub anchor: {}/{} · {}",
+        sub_anchor_provider,
+        sub_anchor_provider_id,
         email.as_deref().unwrap_or("no email")
     );
 
@@ -318,7 +377,32 @@ pub async fn user_detail(
             }
         }
 
-        h2 style="font-size:14px;margin-top:24px;margin-bottom:12px;font-family:var(--font-mono);color:var(--fg-mute);text-transform:uppercase;letter-spacing:0.06em" { "Service grants" }
+        h2 style="font-size:14px;margin-top:24px;margin-bottom:12px;font-family:var(--font-mono);color:var(--fg-mute);text-transform:uppercase;letter-spacing:0.06em" { "Linked identities" }
+        div.table-wrap {
+            table {
+                thead { tr { th { "Provider" } th { "Provider id" } th { "Email" } th { "Linked" } th { "Last seen" } } }
+                tbody {
+                    @for (_iid, prov, pid, iemail, linked, ilast) in &identities {
+                        tr {
+                            td {
+                                span style="display:inline-flex;align-items:center;gap:8px;color:var(--fg-mid)" {
+                                    span style="width:14px;height:14px;display:inline-flex" { (provider_icon(prov)) }
+                                    span.mono style="font-size:12px" { (provider_display_name(prov)) }
+                                }
+                            }
+                            td.mono style="font-size:12px;color:var(--fg-mid)" { (pid) }
+                            td.mono style="font-size:12px;color:var(--fg-mid)" { (iemail.as_deref().unwrap_or("—")) }
+                            td.mono style="font-size:12px;color:var(--fg-mute)" { (fmt_time(*linked)) }
+                            td.mono style="font-size:12px;color:var(--fg-mute)" {
+                                (ilast.map(rel_time).unwrap_or_else(|| "—".into()))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        h2 style="font-size:14px;margin-top:32px;margin-bottom:12px;font-family:var(--font-mono);color:var(--fg-mute);text-transform:uppercase;letter-spacing:0.06em" { "Service grants" }
         div.table-wrap {
             table {
                 thead { tr { th { "Service" } th { "Granted" } th {} } }
@@ -512,7 +596,8 @@ pub async fn requests_page(
         _ => "r.resolved_at IS NULL",
     };
     let sql = format!(
-        "SELECT r.id, u.id, u.username, u.avatar, s.slug, r.requested_at, r.resolved_at, r.decision, u.created_at
+        "SELECT r.id, u.id, u.username, u.avatar, s.slug, r.requested_at, r.resolved_at, r.decision, u.created_at,
+                u.sub_anchor_provider
          FROM access_requests r
          JOIN users u ON u.id = r.user_id
          LEFT JOIN services s ON s.id = r.service_id
@@ -520,8 +605,18 @@ pub async fn requests_page(
          ORDER BY r.requested_at DESC LIMIT 80",
         where_clause
     );
-    let rows: Vec<(i64, i64, String, Option<String>, Option<String>, i64, Option<i64>, Option<String>, i64)> =
-        sqlx::query_as(&sql).fetch_all(&state.pool).await?;
+    let rows: Vec<(
+        i64,
+        i64,
+        String,
+        Option<String>,
+        Option<String>,
+        i64,
+        Option<i64>,
+        Option<String>,
+        i64,
+        String,
+    )> = sqlx::query_as(&sql).fetch_all(&state.pool).await?;
 
     let (pending_n,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM access_requests WHERE resolved_at IS NULL",
@@ -571,7 +666,7 @@ pub async fn requests_page(
             }
         } @else {
             div.req-grid {
-                @for (rid, _uid, uname, uavatar, slug, ra, resolved, decision, created) in &rows {
+                @for (rid, _uid, uname, uavatar, slug, ra, resolved, decision, created, prov) in &rows {
                     div.req-card {
                         div.req-head {
                             span.avatar.lg {
@@ -584,8 +679,8 @@ pub async fn requests_page(
                             div.info {
                                 div.uname { (uname) }
                                 div.via {
-                                    span style="display:inline-flex;width:11px;height:11px" { (github_svg()) }
-                                    span { "via github" }
+                                    span style="display:inline-flex;width:11px;height:11px" { (provider_icon(prov)) }
+                                    span { "via " (prov) }
                                 }
                             }
                             @match (resolved.is_some(), decision.as_deref()) {
@@ -1069,4 +1164,184 @@ fn result_tone(action: &str) -> &'static str {
     } else {
         "info"
     }
+}
+
+// -------------------- Identity providers --------------------
+
+pub async fn providers_page(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    user: Option<Extension<UserCtx>>,
+) -> AppResult<Response> {
+    let user = user.map(|Extension(u)| u);
+    require_admin(user.as_ref())?;
+    let viewer = user.unwrap();
+    let origin = origin_from(&state, &headers);
+    let host = host_from_origin(&origin).to_string();
+    let counts = load_counts(&state).await?;
+
+    let rows: Vec<(String, String, bool, i64)> = sqlx::query_as(
+        "SELECT provider, client_id, enabled, updated_at FROM oauth_providers",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+
+    let cb = format!("{}/auth/callback", origin);
+    let providers = ["github", "google"];
+    let body = html! {
+        (admin_header("Identity providers", Some("rotate OAuth client credentials"), None))
+        p.admin-desc {
+            "OAuth apps registered with each provider. Updating these takes effect on the next login attempt."
+        }
+
+        @for slug in &providers {
+            @let display = provider_display_name(slug);
+            @let configured = rows.iter().find(|(p, _, _, _)| p == slug);
+            @let (list_url, create_url) = provider_console_urls(slug);
+            div.table-wrap style="padding:20px;background:var(--bg-elev);margin-bottom:20px" {
+                div style="display:flex;align-items:center;gap:12px;margin-bottom:12px" {
+                    span style="width:18px;height:18px;display:inline-flex" { (provider_icon(slug)) }
+                    h2 style="margin:0;font-size:15px" { (display) }
+                    @if let Some((_, _, enabled, _)) = configured {
+                        @if *enabled { (pill("active", "enabled")) } @else { (pill("denied", "disabled")) }
+                    } @else {
+                        span.pill { "not configured" }
+                    }
+                }
+                p style="font-size:12px;color:var(--fg-mute);margin:0 0 6px 0;line-height:1.6" {
+                    "manage at "
+                    a target="_blank" rel="noopener" href=(list_url)
+                      style="color:var(--fg);text-decoration:underline" { (list_url) }
+                    " · "
+                    a target="_blank" rel="noopener" href=(create_url)
+                      style="color:var(--fg);text-decoration:underline" { "create new →" }
+                }
+                p.mono style="font-size:12px;color:var(--fg-mute);margin:0 0 4px 0" {
+                    "homepage: " (origin)
+                }
+                p.mono style="font-size:12px;color:var(--fg-mute);margin:0 0 10px 0" {
+                    "callback: " (cb)
+                }
+                form method="post" action=(format!("/admin/providers/save/{}", slug)) style="display:grid;gap:10px;max-width:520px" {
+                    label.field { "Client ID"
+                        input.input name="clientId" required
+                            value=(configured.map(|(_, c, _, _)| c.as_str()).unwrap_or(""));
+                    }
+                    label.field { "Client Secret"
+                        input.input name="clientSecret" type="password" required
+                            placeholder=(if configured.is_some() { "(re-enter to update)" } else { "" });
+                    }
+                    div.row-actions style="margin-top:6px" {
+                        button.btn.primary type="submit" { "Save" }
+                        @if configured.is_some() {
+                            button.btn.danger type="submit"
+                                formaction=(format!("/admin/providers/clear/{}", slug))
+                                formnovalidate
+                                onclick=(format!(
+                                    "return confirm('Clear {} credentials? Users will not be able to sign in with {} until you re-configure it.')",
+                                    display, display
+                                ))
+                                { "Clear" }
+                        }
+                    }
+                }
+            }
+        }
+    };
+    Ok(admin_shell(AdminTab::Providers, &viewer, &host, counts, body).into_response())
+}
+
+/// (browse-existing URL, create-new URL) for each provider's OAuth admin console.
+fn provider_console_urls(slug: &str) -> (&'static str, &'static str) {
+    match slug {
+        "github" => (
+            "https://github.com/settings/developers",
+            "https://github.com/settings/applications/new",
+        ),
+        "google" => (
+            "https://console.cloud.google.com/apis/credentials",
+            "https://console.cloud.google.com/apis/credentials/oauthclient",
+        ),
+        _ => ("", ""),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProviderSaveForm {
+    #[serde(rename = "clientId")]
+    pub client_id: String,
+    #[serde(rename = "clientSecret")]
+    pub client_secret: String,
+}
+
+pub async fn providers_save(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    user: Option<Extension<UserCtx>>,
+    Form(f): Form<ProviderSaveForm>,
+) -> AppResult<Response> {
+    let user = user.map(|Extension(u)| u);
+    let admin = require_admin(user.as_ref())?.clone();
+    if provider != "github" && provider != "google" {
+        return Err(AppError::BadRequest("unknown provider".into()));
+    }
+    let cid = f.client_id.trim();
+    let cs = f.client_secret.trim();
+    if cid.is_empty() || cs.is_empty() {
+        return Err(AppError::BadRequest(
+            "Both client id and secret are required".into(),
+        ));
+    }
+    set_oauth_config(&state.pool, &provider, cid, cs)
+        .await
+        .map_err(AppError::Other)?;
+    audit(
+        &state.pool,
+        Some(admin.id),
+        &format!("setup.{}_configured", provider),
+        Some(&format!("provider:{}", provider)),
+        None,
+    )
+    .await
+    .map_err(AppError::Other)?;
+    Ok(Redirect::to("/admin/providers").into_response())
+}
+
+pub async fn providers_clear(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    user: Option<Extension<UserCtx>>,
+) -> AppResult<Response> {
+    let user = user.map(|Extension(u)| u);
+    let admin = require_admin(user.as_ref())?.clone();
+    if provider != "github" && provider != "google" {
+        return Err(AppError::BadRequest("unknown provider".into()));
+    }
+
+    // Don't let admins wipe out the very last provider.
+    let (other_count,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM oauth_providers WHERE enabled = 1 AND provider != ?",
+    )
+    .bind(&provider)
+    .fetch_one(&state.pool)
+    .await?;
+    if other_count == 0 {
+        return Err(AppError::BadRequest(
+            "can't clear the last enabled provider — nobody could sign in".into(),
+        ));
+    }
+
+    clear_oauth_config(&state.pool, &provider)
+        .await
+        .map_err(AppError::Other)?;
+    audit(
+        &state.pool,
+        Some(admin.id),
+        &format!("setup.{}_cleared", provider),
+        Some(&format!("provider:{}", provider)),
+        None,
+    )
+    .await
+    .map_err(AppError::Other)?;
+    Ok(Redirect::to("/admin/providers").into_response())
 }

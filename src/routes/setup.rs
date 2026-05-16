@@ -7,14 +7,13 @@ use axum::{
 use maud::{html, Markup};
 use serde::Deserialize;
 
+use crate::audit::audit;
 use crate::error::{AppError, AppResult};
 use crate::models::{Service, UserCtx};
-use crate::setup::{
-    clear_github_oauth_config, get_setup_state, set_github_oauth_config,
-};
+use crate::setup::{clear_oauth_config, get_setup_state, set_oauth_config};
 use crate::state::{origin_from, AppState};
 use crate::templates::{
-    bottom_strip, github_svg, host_from_origin, layout, page_chrome, pill,
+    bottom_strip, host_from_origin, layout, page_chrome, pill, provider_icon,
 };
 
 pub async fn page(
@@ -27,7 +26,7 @@ pub async fn page(
         return Ok(Redirect::to("/").into_response());
     }
     let step = setup.step();
-    let services: Vec<Service> = if setup.has_github {
+    let services: Vec<Service> = if setup.has_provider() {
         sqlx::query_as(
             "SELECT id, slug, name, return_url, created_at FROM services
              WHERE deleted_at IS NULL ORDER BY id",
@@ -47,8 +46,8 @@ pub async fn page(
         _ => "Register your services",
     };
     let subtitle = match step {
-        1 => "Bastion needs an OAuth provider to authenticate users. GitHub is required; more providers can be added later.",
-        2 => "Sign in with the GitHub account that should be the first admin. They'll be able to invite others.",
+        1 => "Bastion needs at least one OAuth provider to authenticate users. Configure GitHub, Google, or both.",
+        2 => "Sign in with the account that should be the first admin. They'll be able to invite others.",
         _ => "Each service has a slug, a name, and a return URL. Bastion will redirect authenticated users there with ?bastion_token=<JWT>.",
     };
 
@@ -68,7 +67,7 @@ pub async fn page(
             div.setup-subtitle { (subtitle) }
 
             @match step {
-                1 => (step1(&origin, setup.has_github)),
+                1 => (step1(&origin, setup.has_github, setup.has_google)),
                 2 => (step2(user.as_ref())),
                 _ => (step3(&services, setup.has_services)),
             }
@@ -94,58 +93,152 @@ fn step_marker(n: u8, label: &str, current: u8) -> Markup {
     }
 }
 
-fn step1(origin: &str, configured: bool) -> Markup {
-    let cb = format!("{}/auth/callback", origin);
+fn provider_row(
+    provider_slug: &str,
+    display_name: &str,
+    configured: bool,
+    optional_when_other_present: bool,
+) -> Markup {
     html! {
-        div.setup-rows {
-            div class=(if configured { "setup-row configured" } else { "setup-row" }) {
-                span.ico style="width:18px;height:18px" { (github_svg()) }
-                div.body {
-                    div.label { "GitHub" }
-                    div.detail {
-                        @if configured { "configured" } @else { "required · oauth 2.0" }
+        div class=(if configured { "setup-row configured" } else { "setup-row" }) {
+            span.ico style="width:18px;height:18px" { (provider_icon(provider_slug)) }
+            div.body {
+                div.label { (display_name) }
+                div.detail {
+                    @if configured {
+                        "configured"
+                    } @else if optional_when_other_present {
+                        "optional · oauth 2.0"
+                    } @else {
+                        "needs setup · oauth 2.0"
                     }
                 }
-                @if configured {
-                    (pill("active", "connected"))
-                } @else {
-                    span.mono style="font-size:11px;color:var(--fg-dim)" { "use form below" }
-                }
+            }
+            @if configured {
+                (pill("active", "connected"))
+            } @else {
+                span.mono style="font-size:11px;color:var(--fg-dim)" { "use form below" }
             }
         }
+    }
+}
 
-        @if !configured {
-            div.setup-card {
-                h2 { "Configure GitHub OAuth" }
-                p {
-                    "Create a new OAuth App at "
-                    a target="_blank" href="https://github.com/settings/developers" style="color:var(--fg);text-decoration:underline" {
-                        "github.com/settings/developers"
-                    }
-                    " with these values:"
+fn provider_form(
+    provider_slug: &str,
+    display_name: &str,
+    origin: &str,
+    save_action: &str,
+    extra_lines: Option<Markup>,
+) -> Markup {
+    let cb = format!("{}/auth/callback", origin);
+    let homepage_label = format!("{} OAuth credentials", display_name);
+    html! {
+        div.setup-card {
+            h2 { "Configure " (display_name) }
+            p { (homepage_label) ":" }
+            ul {
+                li { "Homepage URL: " code { (origin) } }
+                li { "Authorization callback URL: " code { (cb) } }
+            }
+            @if let Some(extra) = extra_lines { (extra) }
+            form method="post" action=(save_action) style="margin-top:14px" {
+                label.field { "Client ID"
+                    input.input name="clientId" required;
                 }
-                ul {
-                    li { "Homepage URL: " code { (origin) } }
-                    li { "Authorization callback URL: " code { (cb) } }
+                label.field { "Client Secret"
+                    input.input name="clientSecret" type="password" required;
                 }
-                form method="post" action="/setup/save-github" style="margin-top:14px" {
-                    label.field { "Client ID"
-                        input.input name="clientId" required;
-                    }
-                    label.field { "Client Secret"
-                        input.input name="clientSecret" type="password" required;
-                    }
-                    div style="margin-top:18px" {
-                        button.btn.primary type="submit" { "Save and continue →" }
+                div style="margin-top:18px" {
+                    button.btn.primary type="submit" {
+                        "Save " (display_name) " creds"
                     }
                 }
             }
-        } @else {
+            @if !provider_slug.is_empty() {
+                // anchor for jump-to behavior on /admin/providers, harmless here
+                span hidden { (provider_slug) }
+            }
+        }
+    }
+}
+
+fn step1(origin: &str, has_github: bool, has_google: bool) -> Markup {
+    let has_any = has_github || has_google;
+    let gh_help = html! {
+        p style="font-size:13px;color:var(--fg-mute);line-height:1.6" {
+            "Create a new OAuth App at "
+            a target="_blank" rel="noopener"
+              href="https://github.com/settings/applications/new"
+              style="color:var(--fg);text-decoration:underline" {
+                "github.com/settings/applications/new"
+            }
+            " (your existing apps live at "
+            a target="_blank" rel="noopener"
+              href="https://github.com/settings/developers"
+              style="color:var(--fg);text-decoration:underline" {
+                "github.com/settings/developers"
+            }
+            ")."
+        }
+    };
+    let g_help = html! {
+        p style="font-size:13px;color:var(--fg-mute);line-height:1.6" {
+            "Create OAuth 2.0 credentials (Web application type) at "
+            a target="_blank" rel="noopener"
+              href="https://console.cloud.google.com/apis/credentials/oauthclient"
+              style="color:var(--fg);text-decoration:underline" {
+                "console.cloud.google.com/apis/credentials/oauthclient"
+            }
+            " (existing credentials at "
+            a target="_blank" rel="noopener"
+              href="https://console.cloud.google.com/apis/credentials"
+              style="color:var(--fg);text-decoration:underline" {
+                "console.cloud.google.com/apis/credentials"
+            }
+            ")."
+        }
+    };
+    html! {
+        div.setup-rows {
+            (provider_row("github", "GitHub", has_github, has_any))
+            (provider_row("google", "Google", has_google, has_any))
+        }
+
+        @if !has_github {
+            (provider_form(
+                "github",
+                "GitHub",
+                origin,
+                "/setup/save-provider/github",
+                Some(gh_help),
+            ))
+        }
+        @if !has_google {
+            (provider_form(
+                "google",
+                "Google",
+                origin,
+                "/setup/save-provider/google",
+                Some(g_help),
+            ))
+        }
+
+        @if has_any {
             div.setup-foot {
-                span.progress { "1 of 1 connected · github required" }
+                span.progress {
+                    @if has_github && has_google { "2 of 2 connected" }
+                    @else { "1 of 2 connected · either is sufficient" }
+                }
                 div.actions {
-                    form method="post" action="/setup/reset-github" style="margin:0" {
-                        button.btn.text type="submit" { "← back" }
+                    @if has_github {
+                        form method="post" action="/setup/reset-provider/github" style="margin:0" {
+                            button.btn.text type="submit" { "← reset github" }
+                        }
+                    }
+                    @if has_google {
+                        form method="post" action="/setup/reset-provider/google" style="margin:0" {
+                            button.btn.text type="submit" { "← reset google" }
+                        }
                     }
                     a.btn.primary href="/setup" { "continue →" }
                 }
@@ -160,7 +253,7 @@ fn step2(user: Option<&UserCtx>) -> Markup {
             h2 { "Sign in to claim the first admin account" }
             p {
                 "Bastion needs at least one admin who can register services and approve users. "
-                "Sign in with the GitHub account you want as the first admin."
+                "Sign in with the account you want as the first admin."
             }
             @if let Some(u) = user {
                 p style="margin-top:12px" {
@@ -175,11 +268,8 @@ fn step2(user: Option<&UserCtx>) -> Markup {
                 }
             }
 
-            div style="margin-top:18px;display:flex;gap:8px;align-items:center" {
+            div style="margin-top:18px;display:flex;gap:8px;align-items:center;flex-wrap:wrap" {
                 a.btn.primary href="/auth/login?claim_admin=1" { "Sign in & claim admin →" }
-                form method="post" action="/setup/reset-github" style="margin:0" {
-                    button.btn.text type="submit" { "← back (re-enter GitHub creds)" }
-                }
             }
         }
     }
@@ -248,20 +338,27 @@ fn step3(services: &[Service], has_any: bool) -> Markup {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct SaveGithubForm {
+pub struct SaveProviderForm {
     #[serde(rename = "clientId")]
     pub client_id: String,
     #[serde(rename = "clientSecret")]
     pub client_secret: String,
 }
 
-pub async fn save_github(
+pub async fn save_provider(
     State(state): State<AppState>,
-    Form(f): Form<SaveGithubForm>,
+    axum::extract::Path(provider): axum::extract::Path<String>,
+    Form(f): Form<SaveProviderForm>,
 ) -> AppResult<Response> {
+    if provider != "github" && provider != "google" {
+        return Err(AppError::BadRequest("unknown provider".into()));
+    }
     let setup = get_setup_state(&state.pool).await.map_err(AppError::Other)?;
-    if setup.has_github && setup.has_admin {
-        return Err(AppError::BadRequest("setup already past this step".into()));
+    // Once an admin is claimed and services exist (setup complete), use /admin/providers instead.
+    if setup.complete() {
+        return Err(AppError::BadRequest(
+            "setup already complete; use /admin/providers".into(),
+        ));
     }
     let cid = f.client_id.trim();
     let cs = f.client_secret.trim();
@@ -270,22 +367,46 @@ pub async fn save_github(
             "Both client id and secret are required".into(),
         ));
     }
-    set_github_oauth_config(&state.pool, cid, cs)
+    set_oauth_config(&state.pool, &provider, cid, cs)
         .await
         .map_err(AppError::Other)?;
+    audit(
+        &state.pool,
+        None,
+        &format!("setup.{}_configured", provider),
+        Some(&format!("provider:{}", provider)),
+        None,
+    )
+    .await
+    .map_err(AppError::Other)?;
     Ok(Redirect::to("/setup").into_response())
 }
 
-pub async fn reset_github(State(state): State<AppState>) -> AppResult<Response> {
+pub async fn reset_provider(
+    State(state): State<AppState>,
+    axum::extract::Path(provider): axum::extract::Path<String>,
+) -> AppResult<Response> {
+    if provider != "github" && provider != "google" {
+        return Err(AppError::BadRequest("unknown provider".into()));
+    }
     let setup = get_setup_state(&state.pool).await.map_err(AppError::Other)?;
     if setup.has_admin {
         return Err(AppError::BadRequest(
-            "can't reset creds after an admin has been claimed".into(),
+            "can't reset provider creds after an admin has been claimed".into(),
         ));
     }
-    clear_github_oauth_config(&state.pool)
+    clear_oauth_config(&state.pool, &provider)
         .await
         .map_err(AppError::Other)?;
+    audit(
+        &state.pool,
+        None,
+        &format!("setup.{}_cleared", provider),
+        Some(&format!("provider:{}", provider)),
+        None,
+    )
+    .await
+    .map_err(AppError::Other)?;
     Ok(Redirect::to("/setup").into_response())
 }
 
@@ -312,7 +433,10 @@ fn validate_service(f: &ServiceForm) -> Result<(String, String, String), String>
     if slug.is_empty() || return_url.is_empty() {
         return Err("slug and return url required".into());
     }
-    if !slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+    if !slug
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
         return Err("slug must be lowercase alphanumeric + dashes".into());
     }
     if url::Url::parse(&return_url).is_err() {

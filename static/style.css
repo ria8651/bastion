@@ -129,7 +129,7 @@ h1, h2, h3, h4 { margin: 0; font-weight: 500; }
 .pill.admin    { color: var(--fg); border-color: var(--fg-mid); }
 
 /* ───────── Buttons ───────── */
-.gh-btn {
+.provider-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -144,10 +144,10 @@ h1, h2, h3, h4 { margin: 0; font-weight: 500; }
   width: 100%;
   transition: background 120ms, border-color 120ms, transform 120ms;
 }
-.gh-btn:hover { background: var(--bg-hover); border-color: oklch(0.40 0.004 240); }
-.gh-btn:active { transform: scale(0.99); }
-.gh-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.gh-btn svg { width: 18px; height: 18px; }
+.provider-btn:hover { background: var(--bg-hover); border-color: oklch(0.40 0.004 240); }
+.provider-btn:active { transform: scale(0.99); }
+.provider-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.provider-btn svg { width: 18px; height: 18px; }
 
 .btn {
   display: inline-flex; align-items: center; gap: 6px;

@@ -61,11 +61,21 @@ async fn main() -> anyhow::Result<()> {
         .route("/launch/:slug", get(routes::auth::launch))
         // setup
         .route("/setup", get(routes::setup::page))
-        .route("/setup/save-github", post(routes::setup::save_github))
-        .route("/setup/reset-github", post(routes::setup::reset_github))
+        .route(
+            "/setup/save-provider/:provider",
+            post(routes::setup::save_provider),
+        )
+        .route(
+            "/setup/reset-provider/:provider",
+            post(routes::setup::reset_provider),
+        )
         .route("/setup/add-service", post(routes::setup::add_service))
         .route("/setup/remove-service", post(routes::setup::remove_service))
         .route("/setup/finish", post(routes::setup::finish))
+        // account
+        .route("/account", get(routes::account::page))
+        .route("/account/link", post(routes::account::link_post))
+        .route("/account/unlink", post(routes::account::unlink_post))
         // admin
         .route("/admin", get(routes::admin::index_redirect))
         .route("/admin/audit", get(routes::admin::audit_page))
@@ -96,6 +106,15 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/admin/services/remove",
             post(routes::admin::remove_service),
+        )
+        .route("/admin/providers", get(routes::admin::providers_page))
+        .route(
+            "/admin/providers/save/:provider",
+            post(routes::admin::providers_save),
+        )
+        .route(
+            "/admin/providers/clear/:provider",
+            post(routes::admin::providers_clear),
         )
         // public api
         .route("/.well-known/jwks.json", get(routes::jwks::jwks))

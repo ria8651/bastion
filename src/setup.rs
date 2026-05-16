@@ -3,16 +3,20 @@ use sqlx::SqlitePool;
 
 pub struct SetupState {
     pub has_github: bool,
+    pub has_google: bool,
     pub has_admin: bool,
     pub has_services: bool,
 }
 
 impl SetupState {
+    pub fn has_provider(&self) -> bool {
+        self.has_github || self.has_google
+    }
     pub fn complete(&self) -> bool {
-        self.has_github && self.has_admin && self.has_services
+        self.has_provider() && self.has_admin && self.has_services
     }
     pub fn step(&self) -> u8 {
-        if !self.has_github {
+        if !self.has_provider() {
             1
         } else if !self.has_admin {
             2
@@ -23,10 +27,13 @@ impl SetupState {
 }
 
 pub async fn get_setup_state(pool: &SqlitePool) -> Result<SetupState> {
-    let gh: Option<(String,)> =
-        sqlx::query_as("SELECT provider FROM oauth_providers WHERE provider = 'github'")
-            .fetch_optional(pool)
+    let providers: Vec<(String,)> =
+        sqlx::query_as("SELECT provider FROM oauth_providers WHERE enabled = 1")
+            .fetch_all(pool)
             .await?;
+    let has_github = providers.iter().any(|(p,)| p == "github");
+    let has_google = providers.iter().any(|(p,)| p == "google");
+
     let (admin_count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE is_admin = 1")
         .fetch_one(pool)
         .await?;
@@ -35,26 +42,28 @@ pub async fn get_setup_state(pool: &SqlitePool) -> Result<SetupState> {
             .fetch_one(pool)
             .await?;
     Ok(SetupState {
-        has_github: gh.is_some(),
+        has_github,
+        has_google,
         has_admin: admin_count > 0,
         has_services: svc_count > 0,
     })
 }
 
-pub struct GithubOAuthConfig {
+pub struct OAuthConfig {
     pub client_id: String,
     pub client_secret: String,
 }
 
-pub async fn get_github_oauth_config(pool: &SqlitePool) -> Result<Option<GithubOAuthConfig>> {
+pub async fn get_oauth_config(pool: &SqlitePool, provider: &str) -> Result<Option<OAuthConfig>> {
     let row: Option<(String, String, bool)> = sqlx::query_as(
-        "SELECT client_id, client_secret, enabled FROM oauth_providers WHERE provider = 'github'",
+        "SELECT client_id, client_secret, enabled FROM oauth_providers WHERE provider = ?",
     )
+    .bind(provider)
     .fetch_optional(pool)
     .await?;
     Ok(row.and_then(|(cid, cs, enabled)| {
         if enabled {
-            Some(GithubOAuthConfig {
+            Some(OAuthConfig {
                 client_id: cid,
                 client_secret: cs,
             })
@@ -64,20 +73,22 @@ pub async fn get_github_oauth_config(pool: &SqlitePool) -> Result<Option<GithubO
     }))
 }
 
-pub async fn set_github_oauth_config(
+pub async fn set_oauth_config(
     pool: &SqlitePool,
+    provider: &str,
     client_id: &str,
     client_secret: &str,
 ) -> Result<()> {
     sqlx::query(
         "INSERT INTO oauth_providers (provider, client_id, client_secret, enabled, updated_at)
-         VALUES ('github', ?, ?, 1, unixepoch())
+         VALUES (?, ?, ?, 1, unixepoch())
          ON CONFLICT(provider) DO UPDATE SET
             client_id = excluded.client_id,
             client_secret = excluded.client_secret,
             enabled = 1,
             updated_at = unixepoch()",
     )
+    .bind(provider)
     .bind(client_id)
     .bind(client_secret)
     .execute(pool)
@@ -85,8 +96,9 @@ pub async fn set_github_oauth_config(
     Ok(())
 }
 
-pub async fn clear_github_oauth_config(pool: &SqlitePool) -> Result<()> {
-    sqlx::query("DELETE FROM oauth_providers WHERE provider = 'github'")
+pub async fn clear_oauth_config(pool: &SqlitePool, provider: &str) -> Result<()> {
+    sqlx::query("DELETE FROM oauth_providers WHERE provider = ?")
+        .bind(provider)
         .execute(pool)
         .await?;
     Ok(())

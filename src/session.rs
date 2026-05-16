@@ -53,9 +53,24 @@ pub async fn validate_session_token(
     token: &str,
 ) -> Result<Option<(User, String)>> {
     let id = hash_token(token);
-    let row: Option<(i64, Option<i64>, i64, i64, i64, String, Option<String>, Option<String>, String, bool, i64, Option<i64>)> = sqlx::query_as(
-        "SELECT s.expires_at, s.revoked_at, u.id, u.github_id, u.id as uid2,
-                u.username, u.email, u.avatar, u.status, u.is_admin, u.created_at, u.last_login_at
+    let row: Option<(
+        i64,
+        Option<i64>,
+        i64,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        bool,
+        i64,
+        Option<i64>,
+        String,
+        String,
+    )> = sqlx::query_as(
+        "SELECT s.expires_at, s.revoked_at, u.id,
+                u.username, u.email, u.avatar, u.status, u.is_admin,
+                u.created_at, u.last_login_at,
+                u.sub_anchor_provider, u.sub_anchor_provider_id
          FROM sessions s
          JOIN users u ON u.id = s.user_id
          WHERE s.id = ?",
@@ -64,7 +79,21 @@ pub async fn validate_session_token(
     .fetch_optional(pool)
     .await?;
 
-    let Some((expires_at, revoked_at, uid, github_id, _uid2, username, email, avatar, status, is_admin, created_at, last_login_at)) = row else {
+    let Some((
+        expires_at,
+        revoked_at,
+        uid,
+        username,
+        email,
+        avatar,
+        status,
+        is_admin,
+        created_at,
+        last_login_at,
+        sub_anchor_provider,
+        sub_anchor_provider_id,
+    )) = row
+    else {
         return Ok(None);
     };
     if revoked_at.is_some() {
@@ -89,7 +118,6 @@ pub async fn validate_session_token(
 
     let user = User {
         id: uid,
-        github_id,
         username,
         email,
         avatar,
@@ -97,6 +125,8 @@ pub async fn validate_session_token(
         is_admin,
         created_at,
         last_login_at,
+        sub_anchor_provider,
+        sub_anchor_provider_id,
     };
     Ok(Some((user, id)))
 }

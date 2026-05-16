@@ -7,9 +7,10 @@ use maud::html;
 
 use crate::error::AppResult;
 use crate::models::UserCtx;
+use crate::oauth::Provider;
 use crate::state::AppState;
 use crate::templates::{
-    avatar, bottom_strip, corner_mark, github_svg, landing_page, layout,
+    avatar, bottom_strip, corner_mark, landing_page, layout, provider_icon,
 };
 
 pub async fn index(
@@ -17,7 +18,8 @@ pub async fn index(
     user: Option<Extension<UserCtx>>,
 ) -> AppResult<Response> {
     let Some(Extension(user)) = user else {
-        return Ok(landing_unauthed().into_response());
+        let providers = configured_providers(&state).await?;
+        return Ok(landing_unauthed(&providers).into_response());
     };
 
     match user.status.as_str() {
@@ -27,15 +29,35 @@ pub async fn index(
     }
 }
 
-fn landing_unauthed() -> maud::Markup {
+async fn configured_providers(state: &AppState) -> AppResult<Vec<Provider>> {
+    let rows: Vec<(String,)> =
+        sqlx::query_as("SELECT provider FROM oauth_providers WHERE enabled = 1 ORDER BY provider")
+            .fetch_all(&state.pool)
+            .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(p,)| Provider::parse(&p))
+        .collect())
+}
+
+fn landing_unauthed(providers: &[Provider]) -> maud::Markup {
     let card = html! {
         div.landing-headline { "Sign in to continue" }
         div.landing-subline { "bastion handles auth for your apps" }
         div.provider-stack {
-            form method="post" action="/auth/login" hx-boost="false" style="margin:0" {
-                button.gh-btn type="submit" {
-                    (github_svg())
-                    span { "Continue with GitHub" }
+            @if providers.is_empty() {
+                div style="font-family:var(--font-mono);font-size:12px;color:var(--fg-mute);text-align:center;padding:12px" {
+                    "no identity providers configured"
+                }
+            } @else {
+                @for p in providers {
+                    form method="post" action="/auth/login" hx-boost="false" style="margin:0" {
+                        input type="hidden" name="provider" value=(p.as_str());
+                        button.provider-btn type="submit" {
+                            (provider_icon(p.as_str()))
+                            span { "Continue with " (p.display_name()) }
+                        }
+                    }
                 }
             }
         }
@@ -60,6 +82,18 @@ async fn dashboard(state: &AppState, user: &UserCtx) -> AppResult<maud::Markup> 
     .fetch_all(&state.pool)
     .await?;
 
+    let linked_providers: Vec<(String,)> = sqlx::query_as(
+        "SELECT provider FROM user_identities WHERE user_id = ? ORDER BY linked_at",
+    )
+    .bind(user.id)
+    .fetch_all(&state.pool)
+    .await?;
+    let providers_text = linked_providers
+        .iter()
+        .map(|(p,)| p.clone())
+        .collect::<Vec<_>>()
+        .join(" + ");
+
     let n = services.len();
     let foot_extra = format!("{} services granted", n);
     let body = html! {
@@ -69,6 +103,7 @@ async fn dashboard(state: &AppState, user: &UserCtx) -> AppResult<maud::Markup> 
                 @if user.is_admin {
                     a.admin-pill href="/admin/users" { "admin panel" }
                 }
+                a.admin-pill href="/account" { "account" }
                 div.user-chip {
                     (avatar(user, "sm"))
                     span.name { (user.username) }
@@ -83,7 +118,10 @@ async fn dashboard(state: &AppState, user: &UserCtx) -> AppResult<maud::Markup> 
             div.dash-header {
                 div {
                     div.dash-title { "Your apps" }
-                    div.dash-meta { (n) " services · signed in via github" }
+                    div.dash-meta {
+                        (n) " services · signed in via "
+                        @if providers_text.is_empty() { "—" } @else { (providers_text) }
+                    }
                 }
                 div.dash-sort { }
             }
