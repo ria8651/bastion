@@ -4,14 +4,16 @@
 FROM rust:1.94-bookworm AS builder
 WORKDIR /app
 
-# Cache deps
-COPY Cargo.toml Cargo.lock* ./
-RUN mkdir src && echo "fn main() {}" > src/main.rs && \
-    cargo build --release && \
-    rm -rf src target/release/deps/bastion*
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY migrations ./migrations
+COPY static ./static
 
-COPY . .
-RUN cargo build --release
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/app/target,sharing=locked \
+    cargo build --release && \
+    cp target/release/bastion /bastion
 
 # --- runtime ------------------------------------------------------------------
 FROM debian:bookworm-slim
@@ -24,7 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV DATABASE_PATH=/data/bastion.db
 ENV PORT=5180
 
-COPY --from=builder /app/target/release/bastion /usr/local/bin/bastion
+COPY --from=builder /bastion /usr/local/bin/bastion
 
 RUN mkdir -p /data
 EXPOSE 5180
