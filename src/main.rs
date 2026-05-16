@@ -47,6 +47,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         // public
+        .route("/favicon.svg", get(routes::favicon::favicon))
         .route("/", get(routes::home::index))
         .route("/pending", get(routes::home::pending))
         .route("/denied", get(routes::home::denied))

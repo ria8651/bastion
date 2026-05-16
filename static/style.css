@@ -340,11 +340,6 @@ tbody tr:last-child td { border-bottom: 0; }
   border: 1px solid var(--line);
   border-radius: 4px;
 }
-.admin-pill::before {
-  content: '';
-  width: 5px; height: 5px; border-radius: 999px;
-  background: var(--fg);
-}
 .user-chip {
   display: inline-flex; align-items: center; gap: 8px;
   color: var(--fg-mid);
@@ -458,7 +453,7 @@ tbody tr:last-child td { border-bottom: 0; }
   width: 240px;
   flex: 0 0 240px;
   border-right: 1px solid var(--line-soft);
-  padding: 24px 16px;
+  padding: 16px 16px;
   display: flex; flex-direction: column;
   min-height: 100vh;
 }

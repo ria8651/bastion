@@ -90,12 +90,9 @@ pub async fn users_page(
 
     let total = rows.len();
     let meta = format!("{} total · 1 provider", total);
-    let action = html! {
-        span.btn.text style="cursor:default" title="not implemented yet" { "+ invite" }
-    };
 
     let body = html! {
-        (admin_header("Users", Some(&meta), Some(action)))
+        (admin_header("Users", Some(&meta), None))
         p.admin-desc {
             "Linked accounts. Each user is bound to the identity provider they first signed in with."
         }

@@ -8,8 +8,6 @@ Schema lives in `migrations/NNNN_<name>.sql`, applied via `sqlx::migrate!("./mig
 
 To add a delta: create `migrations/NNNN_<name>.sql` (use the next free number), put plain SQL in it, restart. The migration runs in a transaction; if any statement fails the whole migration rolls back. Use `ALTER TABLE ... ADD COLUMN` for additive changes and `DROP INDEX IF EXISTS` + `CREATE [UNIQUE] INDEX` for index swaps.
 
-Databases initialised under the older `CREATE TABLE IF NOT EXISTS` flow in `src/db.rs::bootstrap` need to be wiped once before switching to migrations, since `sqlx` will try to run `0001_initial` against a schema that has no `_sqlx_migrations` table.
-
 ## Config lives in DB, not env
 
 Env vars: `DATABASE_PATH` (default `./data/bastion.db`), `ORIGIN` (optional; otherwise derived from `X-Forwarded-{Host,Proto}` / `Host`), `PORT` (default 5180), `RUST_LOG`. GitHub OAuth creds, services, first admin — all set via the `/setup` wizard, stored in DB.

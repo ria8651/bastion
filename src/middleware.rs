@@ -43,7 +43,8 @@ pub async fn setup_gate(State(state): State<AppState>, req: Request, next: Next)
         || path.starts_with("/auth/")
         || path.starts_with("/static/")
         || path.starts_with("/.well-known/")
-        || path.starts_with("/api/");
+        || path.starts_with("/api/")
+        || path == "/favicon.svg";
     if !exempt {
         match get_setup_state(&state.pool).await {
             Ok(s) if !s.complete() => return Redirect::to("/setup").into_response(),

@@ -67,7 +67,7 @@ async fn dashboard(state: &AppState, user: &UserCtx) -> AppResult<maud::Markup> 
             (corner_mark(None))
             div.dash-top-right {
                 @if user.is_admin {
-                    a.admin-pill href="/admin/users" { "admin panel →" }
+                    a.admin-pill href="/admin/users" { "admin panel" }
                 }
                 div.user-chip {
                     (avatar(user, "sm"))

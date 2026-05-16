@@ -3,7 +3,7 @@ use maud::{html, Markup, PreEscaped, DOCTYPE};
 use crate::models::UserCtx;
 
 const STYLE: &str = include_str!("../static/style.css");
-const LOGO_SVG: &str = include_str!("../static/logo-icon.svg");
+pub const LOGO_SVG: &str = include_str!("../static/logo-icon.svg");
 const VERSION_TAG: &str = "v0.5";
 
 pub fn layout(title: &str, body: Markup) -> Markup {
@@ -14,6 +14,7 @@ pub fn layout(title: &str, body: Markup) -> Markup {
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width,initial-scale=1";
                 title { (title) " — bastion" }
+                link rel="icon" type="image/svg+xml" href="/favicon.svg";
                 style { (PreEscaped(STYLE)) }
                 script src="https://unpkg.com/htmx.org@2.0.4" defer {}
             }
