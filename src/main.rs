@@ -57,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/auth/callback", get(routes::auth::callback))
         .route("/auth/logout", post(routes::auth::logout))
+        .route("/launch/:slug", get(routes::auth::launch))
         // setup
         .route("/setup", get(routes::setup::page))
         .route("/setup/save-github", post(routes::setup::save_github))
@@ -65,7 +66,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/setup/remove-service", post(routes::setup::remove_service))
         .route("/setup/finish", post(routes::setup::finish))
         // admin
-        .route("/admin", get(routes::admin::overview))
+        .route("/admin", get(routes::admin::index_redirect))
+        .route("/admin/audit", get(routes::admin::audit_page))
         .route("/admin/requests", get(routes::admin::requests_page))
         .route(
             "/admin/requests/approve",

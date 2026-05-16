@@ -2,9 +2,13 @@
 
 Central GitHub-SSO auth service for `../boom` and `../binkflix`. axum + sqlx (SQLite) + maud + htmx + josekit (RS256 JWT/JWKS).
 
-## DB workflow: no migrations
+## DB workflow: sqlx migrations
 
-Schema is defined in `src/db.rs` and applied with `CREATE TABLE IF NOT EXISTS ...` on every startup. Edit the schema there, restart the binary — it's idempotent. On breaking schema changes, wipe the DB; don't write migrations until real data matters.
+Schema lives in `migrations/NNNN_<name>.sql`, applied via `sqlx::migrate!("./migrations")` from `src/db.rs::connect()` at startup. Each schema change is a new numbered file — never edit an applied migration in place, since `sqlx` records its checksum in `_sqlx_migrations` and a mismatch aborts boot.
+
+To add a delta: create `migrations/NNNN_<name>.sql` (use the next free number), put plain SQL in it, restart. The migration runs in a transaction; if any statement fails the whole migration rolls back. Use `ALTER TABLE ... ADD COLUMN` for additive changes and `DROP INDEX IF EXISTS` + `CREATE [UNIQUE] INDEX` for index swaps.
+
+Databases initialised under the older `CREATE TABLE IF NOT EXISTS` flow in `src/db.rs::bootstrap` need to be wiped once before switching to migrations, since `sqlx` will try to run `0001_initial` against a schema that has no `_sqlx_migrations` table.
 
 ## Config lives in DB, not env
 

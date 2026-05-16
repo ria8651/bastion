@@ -80,12 +80,14 @@ pub async fn introspect(
     let mut granted = false;
     let mut service_id: Option<i64> = None;
     if let Some(slug) = &svc {
-        let s: Option<(i64,)> = sqlx::query_as("SELECT id FROM services WHERE slug = ?")
-            .bind(slug)
-            .fetch_optional(&state.pool)
-            .await
-            .ok()
-            .flatten();
+        let s: Option<(i64,)> = sqlx::query_as(
+            "SELECT id FROM services WHERE slug = ? AND deleted_at IS NULL",
+        )
+        .bind(slug)
+        .fetch_optional(&state.pool)
+        .await
+        .ok()
+        .flatten();
         if let Some((sid,)) = s {
             service_id = Some(sid);
             let g: Option<(i64,)> =

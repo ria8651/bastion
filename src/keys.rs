@@ -16,23 +16,21 @@ fn new_kid() -> String {
 
 pub struct ActiveKey {
     pub kid: String,
-    pub alg: String,
     pub private_jwk: Jwk,
 }
 
 /// Get the active signing key, generating one on first use.
 pub async fn get_active_signing_key(pool: &SqlitePool) -> Result<ActiveKey> {
-    let row: Option<(String, String, String)> = sqlx::query_as(
-        "SELECT kid, alg, private_jwk FROM signing_keys WHERE retired_at IS NULL LIMIT 1",
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT kid, private_jwk FROM signing_keys WHERE retired_at IS NULL LIMIT 1",
     )
     .fetch_optional(pool)
     .await?;
-    if let Some((kid, alg, private_jwk)) = row {
+    if let Some((kid, private_jwk)) = row {
         let jwk = Jwk::from_bytes(private_jwk.as_bytes())
             .map_err(|e| anyhow!("decode private jwk: {}", e))?;
         return Ok(ActiveKey {
             kid,
-            alg,
             private_jwk: jwk,
         });
     }
@@ -64,11 +62,7 @@ pub async fn get_active_signing_key(pool: &SqlitePool) -> Result<ActiveKey> {
     .execute(pool)
     .await?;
 
-    Ok(ActiveKey {
-        kid,
-        alg: ALG.to_string(),
-        private_jwk,
-    })
+    Ok(ActiveKey { kid, private_jwk })
 }
 
 /// Public JWKS (all non-retired public keys), as JSON.

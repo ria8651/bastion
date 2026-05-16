@@ -1,5 +1,5 @@
 use axum::{
-    extract::{ConnectInfo, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::HeaderMap,
     response::{IntoResponse, Redirect, Response},
     Extension, Form,
@@ -22,7 +22,7 @@ use crate::session::{
 };
 use crate::setup::get_github_oauth_config;
 use crate::state::{is_secure, origin_from, AppState};
-use crate::templates::layout;
+use crate::templates::{github_svg, landing_page};
 
 #[derive(Debug, Deserialize)]
 pub struct LoginQuery {
@@ -33,46 +33,117 @@ pub struct LoginQuery {
 pub async fn login_page(
     State(state): State<AppState>,
     Query(q): Query<LoginQuery>,
-    user: Option<Extension<UserCtx>>,
+    _user: Option<Extension<UserCtx>>,
 ) -> AppResult<Response> {
-    let user = user.map(|Extension(u)| u);
     let claim_admin = q.claim_admin.as_deref() == Some("1");
 
     // service lookup (display only)
-    let svc_name = if let Some(slug) = q.service.as_deref() {
-        let row: Option<(String,)> = sqlx::query_as("SELECT name FROM services WHERE slug = ?")
+    let svc_row: Option<(String, String)> = if let Some(slug) = q.service.as_deref() {
+        sqlx::query_as("SELECT slug, name FROM services WHERE slug = ? AND deleted_at IS NULL")
             .bind(slug)
             .fetch_optional(&state.pool)
-            .await?;
-        row.map(|(n,)| n)
+            .await?
     } else {
         None
     };
 
+    let svc_slug = q.service.clone();
+    let svc_name = svc_row.as_ref().map(|(_, n)| n.clone());
+    let svc_known = svc_row.is_some();
+    let svc_display = svc_name
+        .clone()
+        .or_else(|| svc_slug.clone())
+        .unwrap_or_default();
+
     let headline = if claim_admin {
-        "Claim root admin".to_string()
-    } else if let Some(n) = &svc_name {
-        format!("Sign in to {}", n)
+        "Claim root admin"
     } else {
-        "Sign in to bastion".to_string()
+        "Sign in to continue"
+    };
+    let subline = if claim_admin {
+        "bastion needs a first admin to manage access".to_string()
+    } else if svc_known {
+        format!("bastion handles auth for {}", svc_display)
+    } else if svc_slug.is_some() {
+        "bastion handles auth for this app".to_string()
+    } else {
+        "bastion handles auth for your apps".to_string()
     };
 
-    let body = html! {
-        div.card style="max-width:420px;margin:3rem auto;text-align:center" {
-            h1 { (headline) }
-            p.muted { "Bastion uses GitHub for authentication." }
-            form method="post" action="/auth/login" hx-boost="false" {
-                @if let Some(s) = &q.service {
+    let card = html! {
+        @if let Some(slug) = &svc_slug {
+            @if svc_known {
+                div.dest-banner {
+                    div.dest-tile { (initials_two(slug)) }
+                    div style="min-width:0;flex:1" {
+                        div.label { "continuing to" }
+                        div.slug { (svc_display) }
+                    }
+                }
+            } @else {
+                div.dest-banner.unknown {
+                    div.dest-tile { "??" }
+                    div style="min-width:0;flex:1" {
+                        div.label { "unknown service" }
+                        div.slug { (slug) }
+                    }
+                    span.pill.denied { "unknown" }
+                }
+            }
+        } @else if claim_admin {
+            div.dest-banner {
+                div.dest-tile { "ba" }
+                div style="min-width:0;flex:1" {
+                    div.label { "first-run setup" }
+                    div.slug { "claim admin" }
+                }
+            }
+        }
+
+        div.landing-headline { (headline) }
+        div.landing-subline { (subline) }
+
+        div.provider-stack {
+            form method="post" action="/auth/login" hx-boost="false" style="margin:0" {
+                @if let Some(s) = &svc_slug {
                     input type="hidden" name="service" value=(s);
                 }
                 @if claim_admin {
                     input type="hidden" name="claim_admin" value="1";
                 }
-                button.btn.primary type="submit" { "Continue with GitHub" }
+                button.gh-btn type="submit" disabled[svc_slug.is_some() && !svc_known] {
+                    (github_svg())
+                    span { "Continue with GitHub" }
+                }
+            }
+        }
+
+        div.landing-footnote {
+            @if svc_slug.is_some() {
+                @if svc_known {
+                    span.mono { (svc_display) } " will receive your bastion id,"
+                    br;
+                    " email, and granted permissions."
+                } @else {
+                    "This service isn't registered with bastion."
+                }
+            } @else {
+                "bastion will share your id, email,"
+                br;
+                " and granted permissions with each app."
             }
         }
     };
-    Ok(layout("Sign in", user.as_ref(), body).into_response())
+    Ok(landing_page("Sign in", card).into_response())
+}
+
+fn initials_two(slug: &str) -> String {
+    let s: String = slug
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(2)
+        .collect();
+    s.to_lowercase()
 }
 
 #[derive(Debug, Deserialize)]
@@ -235,10 +306,12 @@ pub async fn callback(
 
     // Maybe record access request for service redirect
     if let (Some(svc_slug), false) = (stored.service.as_deref(), claim_admin) {
-        let svc: Option<(i64,)> = sqlx::query_as("SELECT id FROM services WHERE slug = ?")
-            .bind(svc_slug)
-            .fetch_optional(&state.pool)
-            .await?;
+        let svc: Option<(i64,)> = sqlx::query_as(
+            "SELECT id FROM services WHERE slug = ? AND deleted_at IS NULL",
+        )
+        .bind(svc_slug)
+        .fetch_optional(&state.pool)
+        .await?;
         if let Some((svc_id,)) = svc {
             let granted: Option<(i64,)> = sqlx::query_as(
                 "SELECT user_id FROM grants WHERE user_id = ? AND service_id = ?",
@@ -311,11 +384,12 @@ pub async fn callback(
 
     // Active user — if a service redirect, mint a token
     if let Some(svc_slug) = stored.service.as_deref() {
-        let svc: Option<(i64, String, String)> =
-            sqlx::query_as("SELECT id, slug, return_url FROM services WHERE slug = ?")
-                .bind(svc_slug)
-                .fetch_optional(&state.pool)
-                .await?;
+        let svc: Option<(i64, String, String)> = sqlx::query_as(
+            "SELECT id, slug, return_url FROM services WHERE slug = ? AND deleted_at IS NULL",
+        )
+        .bind(svc_slug)
+        .fetch_optional(&state.pool)
+        .await?;
         if let Some((svc_id, slug, return_url)) = svc {
             let granted: Option<(i64,)> = sqlx::query_as(
                 "SELECT user_id FROM grants WHERE user_id = ? AND service_id = ?",
@@ -360,6 +434,76 @@ pub async fn callback(
     }
 
     Ok(Redirect::to("/").into_response())
+}
+
+pub async fn launch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(slug): Path<String>,
+    user: Option<Extension<UserCtx>>,
+) -> AppResult<Response> {
+    let user = match user {
+        Some(Extension(u)) => u,
+        None => {
+            return Ok(Redirect::to(&format!(
+                "/auth/login?service={}",
+                urlencoding::encode(&slug)
+            ))
+            .into_response());
+        }
+    };
+    if user.status != "active" {
+        let path = match user.status.as_str() {
+            "denied" => "/denied".to_string(),
+            _ => format!("/pending?service={}", urlencoding::encode(&slug)),
+        };
+        return Ok(Redirect::to(&path).into_response());
+    }
+
+    let svc: Option<(i64, String, String)> = sqlx::query_as(
+        "SELECT id, slug, return_url FROM services WHERE slug = ? AND deleted_at IS NULL",
+    )
+    .bind(&slug)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((svc_id, svc_slug, return_url)) = svc else {
+        return Err(AppError::NotFound);
+    };
+
+    let granted: Option<(i64,)> =
+        sqlx::query_as("SELECT user_id FROM grants WHERE user_id = ? AND service_id = ?")
+            .bind(user.id)
+            .bind(svc_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    if granted.is_none() {
+        return Ok(Redirect::to(&format!(
+            "/pending?service={}",
+            urlencoding::encode(&svc_slug)
+        ))
+        .into_response());
+    }
+
+    let origin = origin_from(&state, &headers);
+    let issued = crate::jwt::issue_service_token(
+        &state.pool,
+        crate::jwt::IssueArgs {
+            issuer: &origin,
+            user_id: user.id,
+            provider: "github",
+            provider_user_id: &user.github_id.to_string(),
+            username: &user.username,
+            service: &svc_slug,
+            perms: vec![],
+        },
+    )
+    .await
+    .map_err(AppError::Other)?;
+
+    let mut dest = url::Url::parse(&return_url).map_err(|e| AppError::Other(e.into()))?;
+    dest.query_pairs_mut()
+        .append_pair("bastion_token", &issued.jwt);
+    Ok(Redirect::to(dest.as_str()).into_response())
 }
 
 pub async fn logout(

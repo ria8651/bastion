@@ -14,15 +14,6 @@ pub struct User {
     pub last_login_at: Option<i64>,
 }
 
-impl User {
-    pub fn is_admin(&self) -> bool {
-        self.is_admin
-    }
-    pub fn is_active(&self) -> bool {
-        self.status == "active"
-    }
-}
-
 #[derive(Debug, Clone, FromRow, Serialize)]
 pub struct Service {
     pub id: i64,
@@ -30,28 +21,6 @@ pub struct Service {
     pub name: String,
     pub return_url: String,
     pub created_at: i64,
-}
-
-#[derive(Debug, Clone, FromRow)]
-pub struct AccessRequest {
-    pub id: i64,
-    pub user_id: i64,
-    pub service_id: Option<i64>,
-    pub note: Option<String>,
-    pub requested_at: i64,
-    pub resolved_at: Option<i64>,
-    pub resolved_by: Option<i64>,
-    pub decision: Option<String>,
-}
-
-#[derive(Debug, Clone, FromRow)]
-pub struct AuditEntry {
-    pub id: i64,
-    pub actor_id: Option<i64>,
-    pub action: String,
-    pub target: Option<String>,
-    pub meta: Option<String>,
-    pub at: i64,
 }
 
 /// Lightweight user context attached to request extensions by middleware.
@@ -83,8 +52,5 @@ impl From<&User> for UserCtx {
 impl UserCtx {
     pub fn is_admin(&self) -> bool {
         self.is_admin
-    }
-    pub fn is_active(&self) -> bool {
-        self.status == "active"
     }
 }

@@ -30,9 +30,10 @@ pub async fn get_setup_state(pool: &SqlitePool) -> Result<SetupState> {
     let (admin_count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE is_admin = 1")
         .fetch_one(pool)
         .await?;
-    let (svc_count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM services")
-        .fetch_one(pool)
-        .await?;
+    let (svc_count,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM services WHERE deleted_at IS NULL")
+            .fetch_one(pool)
+            .await?;
     Ok(SetupState {
         has_github: gh.is_some(),
         has_admin: admin_count > 0,
