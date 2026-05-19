@@ -69,8 +69,11 @@ async fn main() -> anyhow::Result<()> {
             "/setup/reset-provider/:provider",
             post(routes::setup::reset_provider),
         )
+        .route("/setup/pending", get(routes::setup::pending_partial))
         .route("/setup/add-service", post(routes::setup::add_service))
         .route("/setup/remove-service", post(routes::setup::remove_service))
+        .route("/setup/approve-service", post(routes::setup::approve_service))
+        .route("/setup/deny-service", post(routes::setup::deny_service))
         .route("/setup/finish", post(routes::setup::finish))
         // account
         .route("/account", get(routes::account::page))

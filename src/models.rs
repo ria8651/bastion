@@ -15,20 +15,6 @@ pub struct User {
     pub sub_anchor_provider_id: String,
 }
 
-#[derive(Debug, Clone, FromRow, Serialize)]
-pub struct Service {
-    pub id: i64,
-    pub slug: String,
-    pub name: String,
-    pub return_url: String,
-    pub created_at: i64,
-    pub status: String,
-    pub public_jwk: Option<String>,
-    pub registered_at: Option<i64>,
-    pub approved_at: Option<i64>,
-    pub approved_by: Option<i64>,
-}
-
 /// Lightweight service-identity context, returned by verify_service_jwt for
 /// requests authenticated as a service rather than a user.
 #[derive(Debug, Clone)]

@@ -26,7 +26,7 @@ fn fmt_time(unix: i64) -> String {
         .unwrap_or_default()
 }
 
-fn rel_time(unix: i64) -> String {
+pub fn rel_time(unix: i64) -> String {
     let now = Utc::now().timestamp();
     let d = now - unix;
     if d < 60 {
@@ -1299,7 +1299,7 @@ pub async fn services_page(
     Ok(admin_shell(AdminTab::Services, &viewer, &host, counts, body).into_response())
 }
 
-fn jwk_short(jwk_str: Option<&str>) -> String {
+pub fn jwk_short(jwk_str: Option<&str>) -> String {
     let Some(s) = jwk_str else { return "—".into() };
     serde_json::from_str::<serde_json::Value>(s)
         .ok()
@@ -1307,7 +1307,7 @@ fn jwk_short(jwk_str: Option<&str>) -> String {
         .unwrap_or_else(|| "—".into())
 }
 
-fn jwk_thumbprint_short(jwk_str: Option<&str>) -> String {
+pub fn jwk_thumbprint_short(jwk_str: Option<&str>) -> String {
     let Some(s) = jwk_str else { return "—".into() };
     crate::routes::registration::jwk_thumbprint(s)
 }

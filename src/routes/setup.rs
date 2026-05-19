@@ -9,7 +9,8 @@ use serde::Deserialize;
 
 use crate::audit::audit;
 use crate::error::{AppError, AppResult};
-use crate::models::{Service, UserCtx};
+use crate::middleware::require_admin;
+use crate::models::UserCtx;
 use crate::setup::{clear_oauth_config, get_setup_state, set_oauth_config};
 use crate::state::{origin_from, AppState};
 use crate::templates::{
@@ -22,33 +23,37 @@ pub async fn page(
     user: Option<Extension<UserCtx>>,
 ) -> AppResult<Response> {
     let setup = get_setup_state(&state.pool).await.map_err(AppError::Other)?;
-    if setup.complete() {
-        return Ok(Redirect::to("/").into_response());
-    }
     let step = setup.step();
-    let services: Vec<Service> = if setup.has_provider() {
-        sqlx::query_as(
-            "SELECT id, slug, name, return_url, created_at FROM services
-             WHERE deleted_at IS NULL ORDER BY id",
-        )
-        .fetch_all(&state.pool)
-        .await?
-    } else {
-        vec![]
-    };
     let origin = origin_from(&state, &headers);
     let host = host_from_origin(&origin).to_string();
     let user = user.map(|Extension(u)| u);
 
+    // Step 3 is now optional (services can self-register), but we still
+    // show it to give the freshly-claimed admin a chance to approve any
+    // pending registrations or pre-register manually before leaving the
+    // wizard. Anyone arriving at /setup with admin already claimed lands
+    // here too — harmless, and the Finish button gets them out.
+    let (approved, pending, pending_perms) = if step == 3 {
+        let pending = load_pending(&state.pool).await?;
+        let perms = if pending.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            load_pending_perms(&state.pool).await?
+        };
+        (load_approved(&state.pool).await?, pending, perms)
+    } else {
+        (Vec::new(), Vec::new(), std::collections::HashMap::new())
+    };
+
     let title = match step {
         1 => "Connect identity providers",
         2 => "Claim root admin",
-        _ => "Register your services",
+        _ => "Connect your services",
     };
     let subtitle = match step {
         1 => "Bastion needs at least one OAuth provider to authenticate users. Configure GitHub, Google, or both.",
         2 => "Sign in with the account that should be the first admin. They'll be able to invite others.",
-        _ => "Each service has a slug, a name, and a return URL. Bastion will redirect authenticated users there with ?bastion_token=<JWT>.",
+        _ => "Services can register themselves on first boot — leave this page open and they'll appear below for approval. You can also pre-register manually, or skip this step entirely and add services later from /admin/services.",
     };
 
     let body = html! {
@@ -60,7 +65,7 @@ pub async fn page(
                 span.sep {}
                 (step_marker(2, "claim admin", step))
                 span.sep {}
-                (step_marker(3, "add service", step))
+                (step_marker(3, "connect services", step))
             }
 
             div.setup-title { (title) }
@@ -69,12 +74,30 @@ pub async fn page(
             @match step {
                 1 => (step1(&origin, setup.has_github, setup.has_google)),
                 2 => (step2(user.as_ref())),
-                _ => (step3(&services, setup.has_services)),
+                _ => (step3(&approved, &pending, &pending_perms)),
             }
         }
         (bottom_strip(None, true))
     };
     Ok(layout("Setup", body).into_response())
+}
+
+/// htmx polling target — returns just the pending-registrations card so
+/// step 3 can refresh it every few seconds without disturbing the rest
+/// of the page or the manual-add form's focus state.
+pub async fn pending_partial(
+    State(state): State<AppState>,
+    user: Option<Extension<UserCtx>>,
+) -> AppResult<Response> {
+    let user = user.map(|Extension(u)| u);
+    require_admin(user.as_ref())?;
+    let pending = load_pending(&state.pool).await?;
+    let perms = if pending.is_empty() {
+        std::collections::HashMap::new()
+    } else {
+        load_pending_perms(&state.pool).await?
+    };
+    Ok(pending_block(&pending, &perms).into_response())
 }
 
 fn step_marker(n: u8, label: &str, current: u8) -> Markup {
@@ -275,21 +298,73 @@ fn step2(user: Option<&UserCtx>) -> Markup {
     }
 }
 
-fn step3(services: &[Service], has_any: bool) -> Markup {
+type ApprovedRow = (i64, String, String);
+type PendingRow = (i64, String, String, String, Option<String>, Option<i64>);
+
+async fn load_approved(pool: &sqlx::SqlitePool) -> AppResult<Vec<ApprovedRow>> {
+    let rows = sqlx::query_as(
+        "SELECT id, slug, return_url FROM services
+         WHERE deleted_at IS NULL AND status = 'approved'
+         ORDER BY slug",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+async fn load_pending(pool: &sqlx::SqlitePool) -> AppResult<Vec<PendingRow>> {
+    let rows = sqlx::query_as(
+        "SELECT id, slug, name, return_url, public_jwk, registered_at FROM services
+         WHERE deleted_at IS NULL AND status = 'pending'
+         ORDER BY registered_at DESC, id DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+async fn load_pending_perms(
+    pool: &sqlx::SqlitePool,
+) -> AppResult<std::collections::HashMap<i64, Vec<(String, Option<String>)>>> {
+    let rows: Vec<(i64, String, Option<String>)> = sqlx::query_as(
+        "SELECT service_id, key, description FROM permissions
+         WHERE removed_at IS NULL AND service_id IN (
+            SELECT id FROM services WHERE status = 'pending' AND deleted_at IS NULL
+         )
+         ORDER BY service_id, key",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut by_svc: std::collections::HashMap<i64, Vec<(String, Option<String>)>> =
+        std::collections::HashMap::new();
+    for (sid, key, desc) in rows {
+        by_svc.entry(sid).or_default().push((key, desc));
+    }
+    Ok(by_svc)
+}
+
+fn step3(
+    approved: &[ApprovedRow],
+    pending: &[PendingRow],
+    pending_perms: &std::collections::HashMap<i64, Vec<(String, Option<String>)>>,
+) -> Markup {
+    let has_any = !approved.is_empty();
     html! {
-        @if !services.is_empty() {
-            div.setup-rows style="margin-top:32px" {
-                @for s in services {
+        (pending_block(pending, pending_perms))
+
+        @if !approved.is_empty() {
+            div.setup-rows style="margin-top:24px" {
+                @for (id, slug, return_url) in approved {
                     div.setup-row.configured {
                         span.ico style="width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--line);border-radius:6px;background:var(--bg-hover);color:var(--fg-mid);font-family:var(--font-mono);font-size:10px" {
-                            (s.slug.chars().take(2).collect::<String>().to_lowercase())
+                            (slug.chars().take(2).collect::<String>().to_lowercase())
                         }
                         div.body {
-                            div.label { (s.slug) }
-                            div.detail { (s.return_url) }
+                            div.label { (slug) }
+                            div.detail { (return_url) }
                         }
                         form method="post" action="/setup/remove-service" style="margin:0" {
-                            input type="hidden" name="id" value=(s.id);
+                            input type="hidden" name="id" value=(id);
                             button.btn.danger type="submit" { "remove" }
                         }
                     }
@@ -297,9 +372,11 @@ fn step3(services: &[Service], has_any: bool) -> Markup {
             }
         }
 
-        div.setup-card {
-            h2 { "Register a service" }
-            p { "Add at least one app. You can register more later from the admin panel." }
+        details.setup-card style="margin-top:24px" {
+            summary style="cursor:pointer;font-weight:500" { "Register a service manually" }
+            p style="margin-top:10px;font-size:13px;color:var(--fg-mute)" {
+                "Use this when a service can't self-register (e.g., a static frontend with no backend to call /api/services/register)."
+            }
             form method="post" action="/setup/add-service" style="margin-top:14px" {
                 label.field { "Slug (lowercase, dashes ok)"
                     input.input name="slug" required title="lowercase letters, digits, and hyphens";
@@ -319,18 +396,129 @@ fn step3(services: &[Service], has_any: bool) -> Markup {
         div.setup-foot {
             span.progress {
                 @if has_any {
-                    (services.len()) " service" @if services.len() != 1 { "s" } " registered"
+                    (approved.len()) " service" @if approved.len() != 1 { "s" } " connected"
                 } @else {
-                    "no services yet · add at least one"
+                    "no services yet · this step is optional"
                 }
             }
             div.actions {
-                @if has_any {
-                    form method="post" action="/setup/finish" style="margin:0" {
-                        button.btn.primary type="submit" { "Finish setup →" }
+                form method="post" action="/setup/finish" style="margin:0" {
+                    button.btn.primary type="submit" {
+                        @if has_any { "Finish setup →" } @else { "Skip & finish →" }
                     }
-                } @else {
-                    button.btn.primary type="button" disabled { "Finish setup →" }
+                }
+            }
+        }
+    }
+}
+
+fn pending_block(
+    pending: &[PendingRow],
+    pending_perms: &std::collections::HashMap<i64, Vec<(String, Option<String>)>>,
+) -> Markup {
+    html! {
+        div
+          #pending-services
+          hx-get="/setup/pending"
+          hx-trigger="every 4s [!document.activeElement || !document.activeElement.closest('#pending-services')]"
+          hx-target="this"
+          hx-swap="outerHTML"
+        {
+            @if pending.is_empty() {
+                div.setup-card style="border-style:dashed;background:transparent" {
+                    div style="display:flex;align-items:center;gap:10px" {
+                        span style="width:8px;height:8px;border-radius:50%;background:var(--fg-mute);display:inline-block" {}
+                        span style="font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:var(--fg-mute)" {
+                            "waiting for service registrations…"
+                        }
+                    }
+                    p style="margin-top:8px;font-size:13px;color:var(--fg-mute);line-height:1.6" {
+                        "Start a service configured to register with bastion and it'll appear here within a few seconds. Services announce themselves by sending "
+                        code.mono { "POST /api/services/register" }
+                        " on boot."
+                    }
+                }
+            } @else {
+                div style="margin:0 0 12px 2px;font-family:var(--font-mono);font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:var(--fg-mute)" {
+                    "pending registrations · " (pending.len())
+                }
+                div.req-grid style="grid-template-columns:1fr" {
+                    @for (sid, slug, name, ret, jwk_opt, registered_at) in pending {
+                        div.req-card {
+                            div.req-head {
+                                div.info {
+                                    div.uname { (slug) }
+                                    div.via {
+                                        span { (name) }
+                                    }
+                                }
+                                (pill("pending", "pending"))
+                            }
+                            div.req-body style="padding-top:8px;padding-bottom:8px" {
+                                div.lbl style="margin-bottom:4px" { "suggested return url" }
+                                div.mono style="font-size:12px;color:var(--fg-mid);word-break:break-all" {
+                                    @if ret.is_empty() {
+                                        span style="color:var(--fg-mute);font-style:italic" { "(none — set one below)" }
+                                    } @else {
+                                        (ret)
+                                    }
+                                }
+                            }
+                            div.req-meta {
+                                div {
+                                    div.lbl { "kid" }
+                                    div.val.mono style="font-size:11px" {
+                                        (crate::routes::admin::jwk_short(jwk_opt.as_deref()))
+                                    }
+                                }
+                                div {
+                                    div.lbl { "fingerprint" }
+                                    div.val.mono style="font-size:11px" {
+                                        (crate::routes::admin::jwk_thumbprint_short(jwk_opt.as_deref()))
+                                    }
+                                }
+                                div {
+                                    div.lbl { "registered" }
+                                    div.val { (registered_at.map(|t| crate::routes::admin::rel_time(t)).unwrap_or_else(|| "—".into())) }
+                                }
+                            }
+                            @let perms_here = pending_perms.get(sid);
+                            @if let Some(ps) = perms_here {
+                                div style="padding:8px 14px 12px;border-top:1px solid var(--border)" {
+                                    div.lbl style="margin-bottom:6px" { "declared permissions · " (ps.len()) }
+                                    @for (key, desc) in ps {
+                                        div.mono style="font-size:12px;padding:3px 0" {
+                                            (key)
+                                            @if let Some(d) = desc {
+                                                span style="color:var(--fg-mute)" { "  — " (d) }
+                                            }
+                                        }
+                                    }
+                                }
+                            } @else {
+                                div style="padding:8px 14px 12px;border-top:1px solid var(--border);color:var(--fg-mute);font-size:12px" {
+                                    "no permissions declared"
+                                }
+                            }
+                            div style="padding:12px 14px;border-top:1px solid var(--border);display:grid;gap:8px" {
+                                form method="post" action="/setup/approve-service" style="display:grid;gap:8px;margin:0" {
+                                    input type="hidden" name="id" value=(sid);
+                                    label.field style="margin:0" {
+                                        "Return URL (the value users' browsers will be redirected back to)"
+                                        input.input.mono name="returnUrl" value=(ret) required type="url" style="font-size:12px";
+                                    }
+                                    div style="display:flex;gap:8px;align-items:center" {
+                                        button.btn.primary type="submit" { "Approve" }
+                                        button.btn.danger type="submit"
+                                            formaction="/setup/deny-service"
+                                            formnovalidate
+                                            onclick="return confirm('Deny this registration? The service will be blocked from re-registering with the same slug until you remove it.')"
+                                            { "Deny" }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -450,24 +638,31 @@ pub async fn add_service(
     user: Option<Extension<UserCtx>>,
     Form(f): Form<ServiceForm>,
 ) -> AppResult<Response> {
+    let user = user.map(|Extension(u)| u);
+    let admin = require_admin(user.as_ref())?.clone();
     let (slug, name, return_url) = validate_service(&f).map_err(AppError::BadRequest)?;
+    // Manually-added services are admin-approved by definition — drop them
+    // straight into 'approved' so they're usable immediately. Self-registered
+    // services still land as 'pending' via /api/services/register.
     let inserted: Option<(i64,)> = sqlx::query_as(
-        "INSERT INTO services (slug, name, return_url) VALUES (?, ?, ?)
+        "INSERT INTO services (slug, name, return_url, status, approved_at, approved_by)
+         VALUES (?, ?, ?, 'approved', unixepoch(), ?)
          ON CONFLICT(slug) WHERE deleted_at IS NULL DO NOTHING RETURNING id",
     )
     .bind(&slug)
     .bind(&name)
     .bind(&return_url)
+    .bind(admin.id)
     .fetch_optional(&state.pool)
     .await?;
-    if let (Some((svc_id,)), Some(Extension(u))) = (inserted, user) {
+    if let Some((svc_id,)) = inserted {
         sqlx::query(
             "INSERT INTO grants (user_id, service_id, granted_by) VALUES (?, ?, ?)
              ON CONFLICT(user_id, service_id) DO NOTHING",
         )
-        .bind(u.id)
+        .bind(admin.id)
         .bind(svc_id)
-        .bind(u.id)
+        .bind(admin.id)
         .execute(&state.pool)
         .await?;
     }
@@ -481,8 +676,11 @@ pub struct IdForm {
 
 pub async fn remove_service(
     State(state): State<AppState>,
+    user: Option<Extension<UserCtx>>,
     Form(f): Form<IdForm>,
 ) -> AppResult<Response> {
+    let user = user.map(|Extension(u)| u);
+    require_admin(user.as_ref())?;
     sqlx::query("UPDATE services SET deleted_at = unixepoch() WHERE id = ? AND deleted_at IS NULL")
         .bind(f.id)
         .execute(&state.pool)
@@ -490,7 +688,105 @@ pub async fn remove_service(
     Ok(Redirect::to("/setup").into_response())
 }
 
-pub async fn finish(State(state): State<AppState>) -> AppResult<Response> {
+#[derive(Debug, Deserialize)]
+pub struct ApproveServiceForm {
+    pub id: i64,
+    #[serde(rename = "returnUrl")]
+    pub return_url: String,
+}
+
+pub async fn approve_service(
+    State(state): State<AppState>,
+    user: Option<Extension<UserCtx>>,
+    Form(f): Form<ApproveServiceForm>,
+) -> AppResult<Response> {
+    let user = user.map(|Extension(u)| u);
+    let admin = require_admin(user.as_ref())?.clone();
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT slug, status FROM services WHERE id = ? AND deleted_at IS NULL",
+    )
+    .bind(f.id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((slug, status)) = row else {
+        return Err(AppError::BadRequest("not found".into()));
+    };
+    if status != "pending" {
+        return Err(AppError::BadRequest(format!(
+            "service is {}, not pending",
+            status
+        )));
+    }
+    let return_url = f.return_url.trim();
+    if return_url.is_empty() || url::Url::parse(return_url).is_err() {
+        return Err(AppError::BadRequest("return url must be a valid URL".into()));
+    }
+    sqlx::query(
+        "UPDATE services
+         SET status = 'approved', approved_at = unixepoch(), approved_by = ?, return_url = ?
+         WHERE id = ?",
+    )
+    .bind(admin.id)
+    .bind(return_url)
+    .bind(f.id)
+    .execute(&state.pool)
+    .await?;
+    audit(
+        &state.pool,
+        Some(admin.id),
+        "service.approve",
+        Some(&format!("service:{}", f.id)),
+        Some(serde_json::json!({ "slug": slug, "returnUrl": return_url, "from": "setup" })),
+    )
+    .await
+    .map_err(AppError::Other)?;
+    Ok(Redirect::to("/setup").into_response())
+}
+
+pub async fn deny_service(
+    State(state): State<AppState>,
+    user: Option<Extension<UserCtx>>,
+    Form(f): Form<IdForm>,
+) -> AppResult<Response> {
+    let user = user.map(|Extension(u)| u);
+    let admin = require_admin(user.as_ref())?.clone();
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT slug, status FROM services WHERE id = ? AND deleted_at IS NULL",
+    )
+    .bind(f.id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((slug, status)) = row else {
+        return Err(AppError::BadRequest("not found".into()));
+    };
+    if status != "pending" {
+        return Err(AppError::BadRequest(format!(
+            "service is {}, not pending",
+            status
+        )));
+    }
+    sqlx::query("UPDATE services SET status = 'denied' WHERE id = ?")
+        .bind(f.id)
+        .execute(&state.pool)
+        .await?;
+    audit(
+        &state.pool,
+        Some(admin.id),
+        "service.deny",
+        Some(&format!("service:{}", f.id)),
+        Some(serde_json::json!({ "slug": slug, "from": "setup" })),
+    )
+    .await
+    .map_err(AppError::Other)?;
+    Ok(Redirect::to("/setup").into_response())
+}
+
+pub async fn finish(
+    State(state): State<AppState>,
+    user: Option<Extension<UserCtx>>,
+) -> AppResult<Response> {
+    let user = user.map(|Extension(u)| u);
+    require_admin(user.as_ref())?;
     let setup = get_setup_state(&state.pool).await.map_err(AppError::Other)?;
     if !setup.complete() {
         return Err(AppError::BadRequest("setup not complete yet".into()));

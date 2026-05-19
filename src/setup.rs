@@ -5,15 +5,19 @@ pub struct SetupState {
     pub has_github: bool,
     pub has_google: bool,
     pub has_admin: bool,
-    pub has_services: bool,
 }
 
 impl SetupState {
     pub fn has_provider(&self) -> bool {
         self.has_github || self.has_google
     }
+    /// Setup is "complete" once the gate has nothing left to require:
+    /// at least one OAuth provider plus a claimed admin. Service
+    /// registration is optional — services can self-register via
+    /// `POST /api/services/register` and an admin can approve them at any
+    /// time, including from step 3 of the wizard.
     pub fn complete(&self) -> bool {
-        self.has_provider() && self.has_admin && self.has_services
+        self.has_provider() && self.has_admin
     }
     pub fn step(&self) -> u8 {
         if !self.has_provider() {
@@ -37,15 +41,10 @@ pub async fn get_setup_state(pool: &SqlitePool) -> Result<SetupState> {
     let (admin_count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE is_admin = 1")
         .fetch_one(pool)
         .await?;
-    let (svc_count,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM services WHERE deleted_at IS NULL")
-            .fetch_one(pool)
-            .await?;
     Ok(SetupState {
         has_github,
         has_google,
         has_admin: admin_count > 0,
-        has_services: svc_count > 0,
     })
 }
 
