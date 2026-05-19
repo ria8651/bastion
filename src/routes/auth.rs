@@ -12,6 +12,7 @@ use tower_cookies::Cookies;
 use crate::audit::audit;
 use crate::error::{AppError, AppResult};
 use crate::models::UserCtx;
+use sqlx::SqlitePool;
 use crate::oauth::{
     build_authorize_url, clear_state_cookie, exchange_code, fetch_user, generate_state,
     read_state_cookie, set_state_cookie, OAuthState, Provider, RemoteUser,
@@ -30,6 +31,27 @@ pub struct LoginQuery {
     pub claim_admin: Option<String>,
 }
 
+/// Returns the active permission keys granted to `user_id` on `service_id`.
+/// Filters out soft-deleted permissions (`removed_at IS NOT NULL`) so a key
+/// the service dropped from its catalog doesn't leak into freshly issued
+/// tokens.
+async fn load_user_perms(
+    pool: &SqlitePool,
+    user_id: i64,
+    service_id: i64,
+) -> AppResult<Vec<String>> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT p.key FROM user_perms up
+         JOIN permissions p ON p.id = up.permission_id
+         WHERE up.user_id = ? AND p.service_id = ? AND p.removed_at IS NULL",
+    )
+    .bind(user_id)
+    .bind(service_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(k,)| k).collect())
+}
+
 pub async fn login_page(
     State(state): State<AppState>,
     Query(q): Query<LoginQuery>,
@@ -39,10 +61,13 @@ pub async fn login_page(
 
     // service lookup (display only)
     let svc_row: Option<(String, String)> = if let Some(slug) = q.service.as_deref() {
-        sqlx::query_as("SELECT slug, name FROM services WHERE slug = ? AND deleted_at IS NULL")
-            .bind(slug)
-            .fetch_optional(&state.pool)
-            .await?
+        sqlx::query_as(
+            "SELECT slug, name FROM services
+             WHERE slug = ? AND deleted_at IS NULL AND status = 'approved'",
+        )
+        .bind(slug)
+        .fetch_optional(&state.pool)
+        .await?
     } else {
         None
     };
@@ -399,10 +424,12 @@ pub async fn callback(
 
     // Maybe record access request for service redirect
     if let (Some(svc_slug), false) = (stored.service.as_deref(), claim_admin) {
-        let svc: Option<(i64,)> =
-            sqlx::query_as("SELECT id FROM services WHERE slug = ? AND deleted_at IS NULL")
-                .bind(svc_slug)
-                .fetch_optional(&state.pool)
+        let svc: Option<(i64,)> = sqlx::query_as(
+            "SELECT id FROM services
+             WHERE slug = ? AND deleted_at IS NULL AND status = 'approved'",
+        )
+        .bind(svc_slug)
+        .fetch_optional(&state.pool)
                 .await?;
         if let Some((svc_id,)) = svc {
             let granted: Option<(i64,)> =
@@ -474,7 +501,8 @@ pub async fn callback(
     // Active user — if a service redirect, mint a token from the frozen sub anchor.
     if let Some(svc_slug) = stored.service.as_deref() {
         let svc: Option<(i64, String, String)> = sqlx::query_as(
-            "SELECT id, slug, return_url FROM services WHERE slug = ? AND deleted_at IS NULL",
+            "SELECT id, slug, return_url FROM services
+             WHERE slug = ? AND deleted_at IS NULL AND status = 'approved'",
         )
         .bind(svc_slug)
         .fetch_optional(&state.pool)
@@ -494,6 +522,7 @@ pub async fn callback(
                 .bind(user_id)
                 .fetch_one(&state.pool)
                 .await?;
+                let perms = load_user_perms(&state.pool, user_id, svc_id).await?;
                 let issued = crate::jwt::issue_service_token(
                     &state.pool,
                     crate::jwt::IssueArgs {
@@ -503,7 +532,7 @@ pub async fn callback(
                         provider_user_id: &u.2,
                         username: &u.0,
                         service: &slug,
-                        perms: vec![],
+                        perms,
                     },
                 )
                 .await
@@ -660,7 +689,8 @@ pub async fn launch(
     }
 
     let svc: Option<(i64, String, String)> = sqlx::query_as(
-        "SELECT id, slug, return_url FROM services WHERE slug = ? AND deleted_at IS NULL",
+        "SELECT id, slug, return_url FROM services
+         WHERE slug = ? AND deleted_at IS NULL AND status = 'approved'",
     )
     .bind(&slug)
     .fetch_optional(&state.pool)
@@ -684,6 +714,7 @@ pub async fn launch(
     }
 
     let origin = origin_from(&state, &headers);
+    let perms = load_user_perms(&state.pool, user.id, svc_id).await?;
     let issued = crate::jwt::issue_service_token(
         &state.pool,
         crate::jwt::IssueArgs {
@@ -693,7 +724,7 @@ pub async fn launch(
             provider_user_id: &user.sub_anchor_provider_id,
             username: &user.username,
             service: &svc_slug,
-            perms: vec![],
+            perms,
         },
     )
     .await

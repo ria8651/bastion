@@ -277,16 +277,23 @@ pub async fn set_admin(
 
 // -------------------- User detail --------------------
 
+#[derive(Debug, Deserialize)]
+pub struct UserDetailQuery {
+    pub expand: Option<i64>,
+}
+
 pub async fn user_detail(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<i64>,
+    axum::extract::Query(q): axum::extract::Query<UserDetailQuery>,
     user: Option<Extension<UserCtx>>,
 ) -> AppResult<Response> {
     let user = user.map(|Extension(u)| u);
     require_admin(user.as_ref())?;
     let viewer = user.unwrap();
     let host = host_from_origin(&origin_from(&state, &headers)).to_string();
+    let expand_service: Option<i64> = q.expand;
     let counts = load_counts(&state).await?;
 
     let u: Option<(
@@ -335,11 +342,40 @@ pub async fn user_detail(
     let services: Vec<(i64, String, String, bool)> = sqlx::query_as(
         "SELECT s.id, s.slug, s.name,
                 EXISTS(SELECT 1 FROM grants g WHERE g.user_id = ? AND g.service_id = s.id) as granted
-         FROM services s WHERE s.deleted_at IS NULL ORDER BY s.slug",
+         FROM services s
+         WHERE s.deleted_at IS NULL AND s.status = 'approved'
+         ORDER BY s.slug",
     )
     .bind(id)
     .fetch_all(&state.pool)
     .await?;
+
+    // Active perms per service, plus whether this user currently holds each.
+    let perm_rows: Vec<(i64, i64, String, Option<String>, bool, bool)> = sqlx::query_as(
+        "SELECT p.service_id, p.id, p.key, p.description,
+                EXISTS(SELECT 1 FROM user_perms up
+                       WHERE up.user_id = ? AND up.permission_id = p.id) as has_it,
+                p.default_allow
+         FROM permissions p
+         JOIN services s ON s.id = p.service_id
+         WHERE p.removed_at IS NULL
+           AND s.deleted_at IS NULL
+           AND s.status = 'approved'
+         ORDER BY p.service_id, p.key",
+    )
+    .bind(id)
+    .fetch_all(&state.pool)
+    .await?;
+    let mut service_perms: std::collections::HashMap<
+        i64,
+        Vec<(i64, String, Option<String>, bool, bool)>,
+    > = std::collections::HashMap::new();
+    for (sid, pid, key, desc, has_it, default_allow) in perm_rows {
+        service_perms
+            .entry(sid)
+            .or_default()
+            .push((pid, key, desc, has_it, default_allow));
+    }
 
     let requests: Vec<(i64, Option<String>, Option<String>, i64, Option<i64>)> = sqlx::query_as(
         "SELECT r.id, s.slug, r.decision, r.requested_at, r.resolved_at
@@ -366,15 +402,19 @@ pub async fn user_detail(
     );
 
     let body = html! {
-        (admin_header(&uname, Some(&meta), None))
-        p.admin-desc {
-            (status_pill(&status)) " "
-            @if is_admin { (pill("admin", "admin")) " " }
-            "last login " (last.map(fmt_time).unwrap_or_else(|| "never".into()))
-            @if let Some(a) = &avatar_url {
-                " · "
-                img src=(a) style="width:24px;height:24px;border-radius:50%;vertical-align:middle";
+        div.admin-header {
+            div.titlewrap.user-titlewrap {
+                @if let Some(a) = &avatar_url {
+                    img.user-avatar-lg src=(a) alt="";
+                }
+                h1 { (uname) }
+                span.meta { (meta) }
             }
+        }
+        div.admin-desc.user-meta-row {
+            (status_pill(&status))
+            @if is_admin { (pill("admin", "admin")) }
+            span.last-login { "last login " (last.map(fmt_time).unwrap_or_else(|| "never".into())) }
         }
 
         h2 style="font-size:14px;margin-top:24px;margin-bottom:12px;font-family:var(--font-mono);color:var(--fg-mute);text-transform:uppercase;letter-spacing:0.06em" { "Linked identities" }
@@ -405,9 +445,12 @@ pub async fn user_detail(
         h2 style="font-size:14px;margin-top:32px;margin-bottom:12px;font-family:var(--font-mono);color:var(--fg-mute);text-transform:uppercase;letter-spacing:0.06em" { "Service grants" }
         div.table-wrap {
             table {
-                thead { tr { th { "Service" } th { "Granted" } th {} } }
+                thead { tr { th { "Service" } th { "Granted" } th { "Perms" } th {} } }
                 tbody {
                     @for (sid, slug, name, granted) in &services {
+                        @let perms_here = service_perms.get(sid);
+                        @let total_n = perms_here.map(|v| v.len()).unwrap_or(0);
+                        @let on_n = perms_here.map(|v| v.iter().filter(|(_,_,_,h,_)| *h).count()).unwrap_or(0);
                         tr {
                             td {
                                 div.mono style="font-weight:500" { (slug) }
@@ -416,12 +459,65 @@ pub async fn user_detail(
                             td {
                                 @if *granted { (pill("active", "yes")) } @else { span.pill { "no" } }
                             }
-                            td style="text-align:right" {
-                                form method="post" action=(format!("/admin/users/{}/toggle-grant", uid)) style="margin:0" {
+                            td.mono style="font-size:12px;color:var(--fg-mid)" {
+                                @if total_n == 0 {
+                                    span style="color:var(--fg-mute)" { "—" }
+                                } @else if *granted {
+                                    (on_n) " / " (total_n)
+                                } @else {
+                                    span style="color:var(--fg-mute)" { "0 / " (total_n) }
+                                }
+                            }
+                            td style="text-align:right;white-space:nowrap" {
+                                @if *granted && total_n > 0 {
+                                    button.btn.text type="button"
+                                        onclick={
+                                            "var r=this.closest('tr').nextElementSibling;"
+                                            "r.style.display = (r.style.display === 'table-row' ? 'none' : 'table-row');"
+                                        } { "edit perms" }
+                                    " "
+                                }
+                                form method="post" action=(format!("/admin/users/{}/toggle-grant", uid)) style="margin:0;display:inline" {
                                     input type="hidden" name="service_id" value=(sid);
                                     input type="hidden" name="grant" value=(if *granted { "0" } else { "1" });
                                     button.btn type="submit" {
                                         @if *granted { "Revoke" } @else { "Grant" }
+                                    }
+                                }
+                            }
+                        }
+                        @if *granted && total_n > 0 {
+                            @let initially_open = expand_service == Some(*sid);
+                            tr style=(if initially_open {
+                                "display:table-row;background:var(--bg-elev)"
+                            } else {
+                                "display:none;background:var(--bg-elev)"
+                            }) {
+                                td colspan="4" {
+                                    div.lbl style="margin-bottom:8px" {
+                                        "permissions for " (slug)
+                                    }
+                                    div style="display:grid;gap:6px;max-width:680px" {
+                                        @for (pid, key, desc, has_it, default_allow) in perms_here.unwrap() {
+                                            form method="post" action=(format!("/admin/users/{}/toggle-perm", uid)) style="margin:0;display:flex;align-items:center;gap:10px;padding:4px 0" {
+                                                input type="hidden" name="permission_id" value=(pid);
+                                                input type="hidden" name="grant" value=(if *has_it { "0" } else { "1" });
+                                                button.btn type="submit" style=(if *has_it {
+                                                    "min-width:80px"
+                                                } else {
+                                                    "min-width:80px;opacity:0.7"
+                                                }) {
+                                                    @if *has_it { "✓ on" } @else { "off" }
+                                                }
+                                                span.mono style="font-size:12px" { (key) }
+                                                @if *default_allow {
+                                                    span style="color:var(--fg-mute);font-size:10px;text-transform:uppercase;letter-spacing:0.06em" { "default" }
+                                                }
+                                                @if let Some(d) = desc {
+                                                    span style="color:var(--fg-mute);font-size:12px" { "— " (d) }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -491,6 +587,12 @@ pub struct ToggleGrantForm {
     pub grant: i32,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct TogglePermForm {
+    pub permission_id: i64,
+    pub grant: i32,
+}
+
 pub async fn toggle_grant(
     State(state): State<AppState>,
     Path(uid): Path<i64>,
@@ -509,6 +611,7 @@ pub async fn toggle_grant(
         .bind(admin.id)
         .execute(&state.pool)
         .await?;
+        crate::routes::registration::apply_default_perms(&state.pool, uid, f.service_id).await?;
         sqlx::query(
             "UPDATE access_requests SET resolved_at = unixepoch(), resolved_by = ?, decision = 'approved'
              WHERE user_id = ? AND service_id = ? AND resolved_at IS NULL",
@@ -544,6 +647,76 @@ pub async fn toggle_grant(
         .map_err(AppError::Other)?;
     }
     Ok(Redirect::to(&format!("/admin/users/{}", uid)).into_response())
+}
+
+pub async fn toggle_perm(
+    State(state): State<AppState>,
+    Path(uid): Path<i64>,
+    user: Option<Extension<UserCtx>>,
+    Form(f): Form<TogglePermForm>,
+) -> AppResult<Response> {
+    let user = user.map(|Extension(u)| u);
+    let admin = require_admin(user.as_ref())?.clone();
+
+    let row: Option<(i64, String, Option<i64>)> = sqlx::query_as(
+        "SELECT service_id, key, removed_at FROM permissions WHERE id = ?",
+    )
+    .bind(f.permission_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((service_id, key, removed)) = row else {
+        return Err(AppError::BadRequest("permission not found".into()));
+    };
+    if removed.is_some() {
+        return Err(AppError::BadRequest(
+            "permission was removed by the service and can't be granted".into(),
+        ));
+    }
+
+    if f.grant == 1 {
+        sqlx::query(
+            "INSERT INTO user_perms (user_id, permission_id) VALUES (?, ?)
+             ON CONFLICT(user_id, permission_id) DO NOTHING",
+        )
+        .bind(uid)
+        .bind(f.permission_id)
+        .execute(&state.pool)
+        .await?;
+        audit(
+            &state.pool,
+            Some(admin.id),
+            "perm.grant",
+            Some(&format!("user:{}", uid)),
+            Some(serde_json::json!({
+                "serviceId": service_id,
+                "permissionId": f.permission_id,
+                "key": key,
+            })),
+        )
+        .await
+        .map_err(AppError::Other)?;
+    } else {
+        sqlx::query("DELETE FROM user_perms WHERE user_id = ? AND permission_id = ?")
+            .bind(uid)
+            .bind(f.permission_id)
+            .execute(&state.pool)
+            .await?;
+        audit(
+            &state.pool,
+            Some(admin.id),
+            "perm.revoke",
+            Some(&format!("user:{}", uid)),
+            Some(serde_json::json!({
+                "serviceId": service_id,
+                "permissionId": f.permission_id,
+                "key": key,
+            })),
+        )
+        .await
+        .map_err(AppError::Other)?;
+    }
+    // Preserve the expand state so the dropdown stays open across the toggle.
+    Ok(Redirect::to(&format!("/admin/users/{}?expand={}", uid, service_id)).into_response())
 }
 
 pub async fn revoke_sessions(
@@ -768,6 +941,7 @@ pub async fn approve_request(
         .bind(admin.id)
         .execute(&state.pool)
         .await?;
+        crate::routes::registration::apply_default_perms(&state.pool, uid, sid).await?;
     }
     sqlx::query(
         "UPDATE access_requests SET resolved_at = unixepoch(), resolved_by = ?, decision = 'approved'
@@ -842,18 +1016,77 @@ pub async fn services_page(
     let host = host_from_origin(&origin_from(&state, &headers)).to_string();
     let counts = load_counts(&state).await?;
 
-    let rows: Vec<(i64, String, String, String, i64)> = sqlx::query_as(
+    let rows: Vec<(i64, String, String, String, i64, i64)> = sqlx::query_as(
         "SELECT s.id, s.slug, s.name, s.return_url,
-                (SELECT COUNT(*) FROM grants g WHERE g.service_id = s.id) AS user_count
-         FROM services s WHERE s.deleted_at IS NULL ORDER BY s.slug",
+                (SELECT COUNT(*) FROM grants g WHERE g.service_id = s.id) AS user_count,
+                (SELECT COUNT(*) FROM permissions p
+                   WHERE p.service_id = s.id AND p.removed_at IS NULL) AS perm_count
+         FROM services s
+         WHERE s.deleted_at IS NULL AND s.status = 'approved'
+         ORDER BY s.slug",
     )
     .fetch_all(&state.pool)
     .await?;
 
+    let pending: Vec<(i64, String, String, String, Option<String>, Option<i64>)> = sqlx::query_as(
+        "SELECT id, slug, name, return_url, public_jwk, registered_at
+         FROM services
+         WHERE deleted_at IS NULL AND status = 'pending'
+         ORDER BY registered_at DESC",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+
+    // Per-service active perm catalogs, for the pending cards.
+    let mut pending_perms: std::collections::HashMap<i64, Vec<(String, Option<String>)>> =
+        std::collections::HashMap::new();
+    if !pending.is_empty() {
+        let perm_rows: Vec<(i64, String, Option<String>)> = sqlx::query_as(
+            "SELECT service_id, key, description FROM permissions
+             WHERE removed_at IS NULL AND service_id IN (
+                SELECT id FROM services WHERE status = 'pending' AND deleted_at IS NULL
+             )
+             ORDER BY service_id, key",
+        )
+        .fetch_all(&state.pool)
+        .await?;
+        for (sid, key, desc) in perm_rows {
+            pending_perms.entry(sid).or_default().push((key, desc));
+        }
+    }
+
+    // Full perm catalogs (active + soft-deleted) for the approved services.
+    let mut approved_perms: std::collections::HashMap<
+        i64,
+        Vec<(String, Option<String>, Option<i64>, bool)>,
+    > = std::collections::HashMap::new();
+    if !rows.is_empty() {
+        let perm_rows: Vec<(i64, String, Option<String>, Option<i64>, bool)> = sqlx::query_as(
+            "SELECT service_id, key, description, removed_at, default_allow FROM permissions
+             WHERE service_id IN (
+                SELECT id FROM services WHERE status = 'approved' AND deleted_at IS NULL
+             )
+             ORDER BY service_id, removed_at IS NOT NULL, key",
+        )
+        .fetch_all(&state.pool)
+        .await?;
+        for (sid, key, desc, removed, default_allow) in perm_rows {
+            approved_perms
+                .entry(sid)
+                .or_default()
+                .push((key, desc, removed, default_allow));
+        }
+    }
+
     let (total_grants,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM grants")
         .fetch_one(&state.pool)
         .await?;
-    let meta = format!("{} registered · {} grants", rows.len(), total_grants);
+    let meta = format!(
+        "{} approved · {} pending · {} grants",
+        rows.len(),
+        pending.len(),
+        total_grants
+    );
     let action = html! {
         a.btn href="#add-service" { "+ register service" }
     };
@@ -861,9 +1094,90 @@ pub async fn services_page(
     let body = html! {
         (admin_header("Services", Some(&meta), Some(action)))
         p.admin-desc {
-            "Apps that consume bastion-issued JWTs. Each service has a registered return URL and an explicit grant list."
+            "Apps that consume bastion-issued JWTs. Self-registered services land below as pending until you approve them; you can also pre-provision a service manually."
         }
 
+        @if !pending.is_empty() {
+            h2 style="font-size:14px;margin-top:8px;margin-bottom:12px;font-family:var(--font-mono);color:var(--fg-mute);text-transform:uppercase;letter-spacing:0.06em" {
+                "Pending registrations · " (pending.len())
+            }
+            div.req-grid {
+                @for (sid, slug, name, ret, jwk_opt, registered_at) in &pending {
+                    div.req-card {
+                        div.req-head {
+                            div.info {
+                                div.uname { (slug) }
+                                div.via {
+                                    span { (name) }
+                                }
+                            }
+                            (pill("pending", "pending"))
+                        }
+                        div.req-body style="padding-top:8px;padding-bottom:8px" {
+                            div.lbl style="margin-bottom:4px" { "suggested return url" }
+                            div.mono style="font-size:12px;color:var(--fg-mid);word-break:break-all" { (ret) }
+                        }
+                        div.req-meta {
+                            div {
+                                div.lbl { "kid" }
+                                div.val.mono style="font-size:11px" {
+                                    (jwk_short(jwk_opt.as_deref()))
+                                }
+                            }
+                            div {
+                                div.lbl { "fingerprint" }
+                                div.val.mono style="font-size:11px" {
+                                    (jwk_thumbprint_short(jwk_opt.as_deref()))
+                                }
+                            }
+                            div {
+                                div.lbl { "registered" }
+                                div.val { (registered_at.map(|t| rel_time(t)).unwrap_or_else(|| "—".into())) }
+                            }
+                        }
+                        @let perms_here = pending_perms.get(sid);
+                        @if let Some(ps) = perms_here {
+                            div style="padding:8px 14px 12px;border-top:1px solid var(--border)" {
+                                div.lbl style="margin-bottom:6px" { "declared permissions · " (ps.len()) }
+                                @for (key, desc) in ps {
+                                    div.mono style="font-size:12px;padding:3px 0" {
+                                        (key)
+                                        @if let Some(d) = desc {
+                                            span style="color:var(--fg-mute)" { "  — " (d) }
+                                        }
+                                    }
+                                }
+                            }
+                        } @else {
+                            div style="padding:8px 14px 12px;border-top:1px solid var(--border);color:var(--fg-mute);font-size:12px" {
+                                "no permissions declared"
+                            }
+                        }
+                        div style="padding:12px 14px;border-top:1px solid var(--border);display:grid;gap:8px" {
+                            form method="post" action="/admin/services/approve-registration" style="display:grid;gap:8px;margin:0" {
+                                input type="hidden" name="id" value=(sid);
+                                label.field style="margin:0" {
+                                    "Return URL (the value users' browsers will be redirected back to)"
+                                    input.input.mono name="returnUrl" value=(ret) required type="url" style="font-size:12px";
+                                }
+                                div style="display:flex;gap:8px;align-items:center" {
+                                    button.btn.primary type="submit" { "Approve" }
+                                    button.btn.danger type="submit"
+                                        formaction="/admin/services/deny-registration"
+                                        formnovalidate
+                                        onclick="return confirm('Deny this registration? The service will be blocked from re-registering with the same slug until you remove it.')"
+                                        { "Deny" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        h2 style="font-size:14px;margin-top:24px;margin-bottom:12px;font-family:var(--font-mono);color:var(--fg-mute);text-transform:uppercase;letter-spacing:0.06em" {
+            "Approved services · " (rows.len())
+        }
         div.filter-row {
             input.input.mono style="width:240px" placeholder="filter service…";
             span.sort { "sort: alphabetical" }
@@ -881,7 +1195,7 @@ pub async fn services_page(
                     }
                 }
                 tbody {
-                    @for (id, slug, name, ret, n) in &rows {
+                    @for (id, slug, name, ret, n, perm_n) in &rows {
                         tr {
                             td {
                                 div.mono style="font-size:13px;font-weight:500" { (slug) }
@@ -891,7 +1205,7 @@ pub async fn services_page(
                                 (ret)
                             }
                             td.mono style="font-size:13px;color:var(--fg)" { (n) }
-                            td.mono style="font-size:13px;color:var(--fg-dim)" { "0" }
+                            td.mono style="font-size:13px;color:var(--fg)" { (perm_n) }
                             td style="text-align:right" {
                                 button.btn.text type="button"
                                     onclick={
@@ -902,18 +1216,64 @@ pub async fn services_page(
                         }
                         tr style="display:none;background:var(--bg-elev)" {
                             td colspan="5" {
-                                form method="post" action="/admin/services/update" style="display:grid;gap:10px;max-width:520px" {
-                                    input type="hidden" name="id" value=(id);
-                                    label.field { "Slug" input.input name="slug" value=(slug) required; }
-                                    label.field { "Name" input.input name="name" value=(name); }
-                                    label.field { "Return URL" input.input name="returnUrl" value=(ret) required type="url"; }
-                                    div.row-actions style="margin-top:6px" {
-                                        button.btn.primary type="submit" { "Save" }
-                                        button.btn.danger type="submit"
-                                            formaction="/admin/services/remove"
-                                            formnovalidate
-                                            onclick="return confirm('Remove this service? Existing grants will also be removed.')"
-                                            { "Remove" }
+                                div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.4fr);gap:32px;align-items:start" {
+                                    form method="post" action="/admin/services/update" style="display:grid;gap:10px;max-width:520px" {
+                                        input type="hidden" name="id" value=(id);
+                                        label.field { "Slug" input.input name="slug" value=(slug) required; }
+                                        label.field { "Name" input.input name="name" value=(name); }
+                                        label.field { "Return URL" input.input name="returnUrl" value=(ret) required type="url"; }
+                                        div.row-actions style="margin-top:6px" {
+                                            button.btn.primary type="submit" { "Save" }
+                                            button.btn.danger type="submit"
+                                                formaction="/admin/services/remove"
+                                                formnovalidate
+                                                onclick="return confirm('Remove this service? Existing grants will also be removed.')"
+                                                { "Remove" }
+                                        }
+                                    }
+                                    div {
+                                        @let entries = approved_perms.get(id);
+                                        @let active_n = entries.map(|v| v.iter().filter(|(_,_,r,_)| r.is_none()).count()).unwrap_or(0);
+                                        @let removed_n = entries.map(|v| v.iter().filter(|(_,_,r,_)| r.is_some()).count()).unwrap_or(0);
+                                        div.lbl style="margin-bottom:8px" {
+                                            "permission catalog · " (active_n) " active"
+                                            @if removed_n > 0 { " · " (removed_n) " removed" }
+                                        }
+                                        @match entries {
+                                            Some(es) if !es.is_empty() => {
+                                                div style="display:grid;gap:4px" {
+                                                    @for (key, desc, removed, default_allow) in es {
+                                                        @let is_removed = removed.is_some();
+                                                        div.mono style=(if is_removed {
+                                                            "font-size:12px;color:var(--fg-mute);text-decoration:line-through"
+                                                        } else {
+                                                            "font-size:12px;color:var(--fg)"
+                                                        }) {
+                                                            (key)
+                                                            @if *default_allow && !is_removed {
+                                                                span style="color:var(--fg-mute);text-decoration:none;margin-left:6px;font-size:10px;text-transform:uppercase;letter-spacing:0.06em" { "default" }
+                                                            }
+                                                            @if let Some(d) = desc {
+                                                                span style="color:var(--fg-mute);text-decoration:none" { "  — " (d) }
+                                                            }
+                                                            @if let Some(at) = removed {
+                                                                span style="color:var(--fg-mute);text-decoration:none;margin-left:6px" {
+                                                                    "(removed " (rel_time(*at)) ")"
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                div style="margin-top:10px;font-size:11px;color:var(--fg-mute)" {
+                                                    "catalog is owned by the service — declared via /api/services/register on boot."
+                                                }
+                                            }
+                                            _ => {
+                                                div.mono style="font-size:12px;color:var(--fg-mute)" {
+                                                    "no permissions declared"
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -923,7 +1283,10 @@ pub async fn services_page(
             }
         }
 
-        h2 id="add-service" style="font-size:14px;margin-top:32px;margin-bottom:12px;font-family:var(--font-mono);color:var(--fg-mute);text-transform:uppercase;letter-spacing:0.06em" { "Register a new service" }
+        h2 id="add-service" style="font-size:14px;margin-top:32px;margin-bottom:12px;font-family:var(--font-mono);color:var(--fg-mute);text-transform:uppercase;letter-spacing:0.06em" { "Pre-provision a service (manual)" }
+        p.admin-desc style="margin-top:-6px" {
+            "Use this only when a service can't self-register. Most services should POST to /api/services/register on first boot."
+        }
         div.table-wrap style="padding:20px;background:var(--bg-elev)" {
             form method="post" action="/admin/services/add" style="display:grid;gap:10px;max-width:520px" {
                 label.field { "Slug (lowercase, dashes ok)" input.input name="slug" required title="lowercase letters, digits, and hyphens"; }
@@ -934,6 +1297,19 @@ pub async fn services_page(
         }
     };
     Ok(admin_shell(AdminTab::Services, &viewer, &host, counts, body).into_response())
+}
+
+fn jwk_short(jwk_str: Option<&str>) -> String {
+    let Some(s) = jwk_str else { return "—".into() };
+    serde_json::from_str::<serde_json::Value>(s)
+        .ok()
+        .and_then(|v| v.get("kid").and_then(|k| k.as_str()).map(String::from))
+        .unwrap_or_else(|| "—".into())
+}
+
+fn jwk_thumbprint_short(jwk_str: Option<&str>) -> String {
+    let Some(s) = jwk_str else { return "—".into() };
+    crate::routes::registration::jwk_thumbprint(s)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1004,6 +1380,7 @@ pub async fn add_service(
     .bind(admin.id)
     .execute(&state.pool)
     .await?;
+    crate::routes::registration::apply_default_perms(&state.pool, admin.id, sid).await?;
     audit(
         &state.pool,
         Some(admin.id),
@@ -1061,6 +1438,99 @@ pub async fn remove_service(
         "service.remove",
         Some(&format!("service:{}", f.id)),
         None,
+    )
+    .await
+    .map_err(AppError::Other)?;
+    Ok(Redirect::to("/admin/services").into_response())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApproveRegistrationForm {
+    pub id: i64,
+    #[serde(rename = "returnUrl")]
+    pub return_url: String,
+}
+
+pub async fn approve_registration(
+    State(state): State<AppState>,
+    user: Option<Extension<UserCtx>>,
+    Form(f): Form<ApproveRegistrationForm>,
+) -> AppResult<Response> {
+    let user = user.map(|Extension(u)| u);
+    let admin = require_admin(user.as_ref())?.clone();
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT slug, status FROM services WHERE id = ? AND deleted_at IS NULL",
+    )
+    .bind(f.id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((slug, status)) = row else {
+        return Err(AppError::BadRequest("not found".into()));
+    };
+    if status != "pending" {
+        return Err(AppError::BadRequest(format!(
+            "service is {}, not pending",
+            status
+        )));
+    }
+    let return_url = f.return_url.trim();
+    if return_url.is_empty() || url::Url::parse(return_url).is_err() {
+        return Err(AppError::BadRequest("return url must be a valid URL".into()));
+    }
+    sqlx::query(
+        "UPDATE services
+         SET status = 'approved', approved_at = unixepoch(), approved_by = ?, return_url = ?
+         WHERE id = ?",
+    )
+    .bind(admin.id)
+    .bind(return_url)
+    .bind(f.id)
+    .execute(&state.pool)
+    .await?;
+    audit(
+        &state.pool,
+        Some(admin.id),
+        "service.approve",
+        Some(&format!("service:{}", f.id)),
+        Some(serde_json::json!({ "slug": slug, "returnUrl": return_url })),
+    )
+    .await
+    .map_err(AppError::Other)?;
+    Ok(Redirect::to("/admin/services").into_response())
+}
+
+pub async fn deny_registration(
+    State(state): State<AppState>,
+    user: Option<Extension<UserCtx>>,
+    Form(f): Form<IdForm>,
+) -> AppResult<Response> {
+    let user = user.map(|Extension(u)| u);
+    let admin = require_admin(user.as_ref())?.clone();
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT slug, status FROM services WHERE id = ? AND deleted_at IS NULL",
+    )
+    .bind(f.id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((slug, status)) = row else {
+        return Err(AppError::BadRequest("not found".into()));
+    };
+    if status != "pending" {
+        return Err(AppError::BadRequest(format!(
+            "service is {}, not pending",
+            status
+        )));
+    }
+    sqlx::query("UPDATE services SET status = 'denied' WHERE id = ?")
+        .bind(f.id)
+        .execute(&state.pool)
+        .await?;
+    audit(
+        &state.pool,
+        Some(admin.id),
+        "service.deny",
+        Some(&format!("service:{}", f.id)),
+        Some(serde_json::json!({ "slug": slug })),
     )
     .await
     .map_err(AppError::Other)?;

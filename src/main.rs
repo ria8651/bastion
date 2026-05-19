@@ -94,6 +94,10 @@ async fn main() -> anyhow::Result<()> {
             post(routes::admin::toggle_grant),
         )
         .route(
+            "/admin/users/:id/toggle-perm",
+            post(routes::admin::toggle_perm),
+        )
+        .route(
             "/admin/users/:id/revoke-sessions",
             post(routes::admin::revoke_sessions),
         )
@@ -107,6 +111,14 @@ async fn main() -> anyhow::Result<()> {
             "/admin/services/remove",
             post(routes::admin::remove_service),
         )
+        .route(
+            "/admin/services/approve-registration",
+            post(routes::admin::approve_registration),
+        )
+        .route(
+            "/admin/services/deny-registration",
+            post(routes::admin::deny_registration),
+        )
         .route("/admin/providers", get(routes::admin::providers_page))
         .route(
             "/admin/providers/save/:provider",
@@ -119,6 +131,18 @@ async fn main() -> anyhow::Result<()> {
         // public api
         .route("/.well-known/jwks.json", get(routes::jwks::jwks))
         .route("/api/introspect", get(routes::introspect::introspect))
+        .route(
+            "/api/services/register",
+            post(routes::registration::register),
+        )
+        .route(
+            "/api/services/:slug/status",
+            get(routes::registration::status),
+        )
+        .route(
+            "/api/services/:slug/permissions",
+            axum::routing::put(routes::registration::put_permissions),
+        )
         // middleware
         .layer(axmw::from_fn_with_state(state.clone(), middleware::setup_gate))
         .layer(axmw::from_fn_with_state(state.clone(), middleware::load_user))

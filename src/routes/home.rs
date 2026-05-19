@@ -1,9 +1,10 @@
 use axum::{
-    extract::State,
+    extract::{Query, State},
     response::{IntoResponse, Response},
     Extension,
 };
 use maud::html;
+use serde::Deserialize;
 
 use crate::error::AppResult;
 use crate::models::UserCtx;
@@ -23,10 +24,15 @@ pub async fn index(
     };
 
     match user.status.as_str() {
-        "pending" => Ok(pending_for(Some(&user)).into_response()),
+        "pending" => Ok(pending_for(Some(&user), None).into_response()),
         "denied" => Ok(denied_for().into_response()),
         _ => Ok(dashboard(&state, &user).await?.into_response()),
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PendingQuery {
+    pub service: Option<String>,
 }
 
 async fn configured_providers(state: &AppState) -> AppResult<Vec<Provider>> {
@@ -163,12 +169,16 @@ fn tile_initials(slug: &str) -> String {
         .to_lowercase()
 }
 
-pub async fn pending(user: Option<Extension<UserCtx>>) -> impl IntoResponse {
+pub async fn pending(
+    user: Option<Extension<UserCtx>>,
+    Query(q): Query<PendingQuery>,
+) -> impl IntoResponse {
     let user = user.map(|Extension(u)| u);
-    pending_for(user.as_ref())
+    pending_for(user.as_ref(), q.service.as_deref())
 }
 
-fn pending_for(user: Option<&UserCtx>) -> maud::Markup {
+fn pending_for(user: Option<&UserCtx>, service: Option<&str>) -> maud::Markup {
+    let retry_url = service.map(|s| format!("/launch/{}", s));
     let card = html! {
         div.landing-headline { "Waiting for approval" }
         div.landing-subline {
@@ -180,9 +190,15 @@ fn pending_for(user: Option<&UserCtx>) -> maud::Markup {
         div.landing-footnote {
             @match user {
                 Some(_) => {
-                    "Your account is pending an admin's review."
-                    br;
-                    " You'll be able to access your apps once it's approved."
+                    @if let Some(slug) = service {
+                        "Access to " span.mono { (slug) } " is pending an admin's review."
+                        br;
+                        " Click " strong { "Try again" } " once you've been granted."
+                    } @else {
+                        "Your account is pending an admin's review."
+                        br;
+                        " You'll be able to access your apps once it's approved."
+                    }
                 }
                 None => {
                     "Not signed in. "
@@ -190,10 +206,17 @@ fn pending_for(user: Option<&UserCtx>) -> maud::Markup {
                 }
             }
         }
-        @if user.is_some() {
+        @if user.is_some() || retry_url.is_some() {
             div.provider-stack {
-                form method="post" action="/auth/logout" hx-boost="false" style="margin:0" {
-                    button.btn type="submit" style="width:100%;justify-content:center" { "Log out" }
+                @if let Some(url) = &retry_url {
+                    a.btn.primary href=(url) hx-boost="false" style="width:100%;justify-content:center" {
+                        "Try again"
+                    }
+                }
+                @if user.is_some() {
+                    form method="post" action="/auth/logout" hx-boost="false" style="margin:0" {
+                        button.btn type="submit" style="width:100%;justify-content:center" { "Log out" }
+                    }
                 }
             }
         }

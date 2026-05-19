@@ -81,7 +81,8 @@ pub async fn introspect(
     let mut service_id: Option<i64> = None;
     if let Some(slug) = &svc {
         let s: Option<(i64,)> = sqlx::query_as(
-            "SELECT id FROM services WHERE slug = ? AND deleted_at IS NULL",
+            "SELECT id FROM services
+             WHERE slug = ? AND deleted_at IS NULL AND status = 'approved'",
         )
         .bind(slug)
         .fetch_optional(&state.pool)
@@ -106,7 +107,7 @@ pub async fn introspect(
         sqlx::query_as::<_, (String,)>(
             "SELECT p.key FROM user_perms up
              JOIN permissions p ON p.id = up.permission_id
-             WHERE up.user_id = ? AND p.service_id = ?",
+             WHERE up.user_id = ? AND p.service_id = ? AND p.removed_at IS NULL",
         )
         .bind(uid)
         .bind(sid)
