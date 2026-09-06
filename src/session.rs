@@ -1,4 +1,6 @@
 use anyhow::Result;
+use axum::http::{header::SET_COOKIE, HeaderValue};
+use axum::response::Response;
 use chrono::Utc;
 use data_encoding::BASE32_NOPAD;
 use rand::RngCore;
@@ -131,6 +133,20 @@ pub async fn validate_session_token(
     Ok(Some((user, id)))
 }
 
+/// Expiry of a live session, for re-issuing its cookie without disturbing the
+/// session itself. `None` if the token is unknown, revoked or expired.
+pub async fn session_expiry(pool: &SqlitePool, token: &str) -> Option<i64> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        "SELECT expires_at FROM sessions
+         WHERE id = ? AND revoked_at IS NULL AND expires_at > unixepoch()",
+    )
+    .bind(hash_token(token))
+    .fetch_optional(pool)
+    .await
+    .ok()?;
+    row.map(|(e,)| e)
+}
+
 pub async fn invalidate_session(pool: &SqlitePool, token: &str) -> Result<()> {
     let id = hash_token(token);
     sqlx::query("DELETE FROM sessions WHERE id = ?")
@@ -140,9 +156,23 @@ pub async fn invalidate_session(pool: &SqlitePool, token: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn set_session_cookie(cookies: &Cookies, token: &str, secure: bool, expires_at_unix: i64) {
+/// `domain` scopes the cookie to a parent domain (`.example.com`) so it is
+/// also sent on requests to proxied hosts — which is what makes proxy mode
+/// work, since sign-in happens on bastion's own hostname.
+/// `None` leaves the cookie host-only, the right default when nothing is being
+/// proxied.
+pub fn set_session_cookie(
+    cookies: &Cookies,
+    token: &str,
+    secure: bool,
+    expires_at_unix: i64,
+    domain: Option<&str>,
+) {
     let mut c = Cookie::new(SESSION_COOKIE, token.to_string());
     c.set_path("/");
+    if let Some(d) = domain {
+        c.set_domain(d.to_string());
+    }
     c.set_http_only(true);
     c.set_same_site(SameSite::Lax);
     c.set_secure(secure);
@@ -154,10 +184,38 @@ pub fn set_session_cookie(cookies: &Cookies, token: &str, secure: bool, expires_
     cookies.add(c);
 }
 
-pub fn clear_session_cookie(cookies: &Cookies) {
+/// Clears the session cookie. With a domain configured this clears the
+/// domain-scoped one; pair it with [`expire_host_only_session`] to also drop a
+/// leftover host-only cookie.
+pub fn clear_session_cookie(cookies: &Cookies, domain: Option<&str>) {
     let mut c = Cookie::from(SESSION_COOKIE);
     c.set_path("/");
+    if let Some(d) = domain {
+        c.set_domain(d.to_string());
+    }
     cookies.remove(c);
+}
+
+/// Appends a `Set-Cookie` expiring the *host-only* session cookie.
+///
+/// This can't go through the cookie jar: the `cookie` crate keys both its
+/// original and its delta sets by cookie name alone, so a jar carries at most
+/// one `bastion_session` removal and the domain-scoped one wins.
+///
+/// It matters when `cookie_domain` is turned on with sessions already in the
+/// wild. A browser then holds two `bastion_session` cookies and sends both;
+/// RFC 6265 orders them by path length then creation time, so the older
+/// host-only one comes first and is the one parsed, shadowing every new
+/// domain-scoped session indefinitely. Expiring by name with no Domain
+/// attribute removes only the host-only cookie — cookie deletion matches on
+/// (name, domain, path), so the domain-scoped one is untouched.
+pub fn expire_host_only_session(res: &mut Response) {
+    if let Ok(v) = HeaderValue::from_str(&format!(
+        "{}=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+        SESSION_COOKIE
+    )) {
+        res.headers_mut().append(SET_COOKIE, v);
+    }
 }
 
 pub fn read_session_cookie(cookies: &Cookies) -> Option<String> {

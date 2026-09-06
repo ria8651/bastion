@@ -12,7 +12,9 @@ use tower_cookies::Cookies;
 
 use crate::error::AppError;
 use crate::models::{ServiceCtx, UserCtx};
-use crate::session::{clear_session_cookie, read_session_cookie, validate_session_token};
+use crate::session::{
+    clear_session_cookie, expire_host_only_session, read_session_cookie, validate_session_token,
+};
 use crate::setup::get_setup_state;
 use crate::state::AppState;
 
@@ -23,6 +25,7 @@ pub async fn load_user(
     mut req: Request,
     next: Next,
 ) -> Response {
+    let mut drop_host_only = false;
     if let Some(token) = read_session_cookie(&cookies) {
         match validate_session_token(&state.pool, &token).await {
             Ok(Some((user, _sid))) => {
@@ -30,14 +33,23 @@ pub async fn load_user(
                 req.extensions_mut().insert(ctx);
             }
             Ok(None) => {
-                clear_session_cookie(&cookies);
+                let domain = crate::settings::cookie_domain(&state.pool).await;
+                clear_session_cookie(&cookies, domain.as_deref());
+                // A cookie that doesn't validate while a cookie domain is set
+                // is very likely a host-only leftover from before the switch,
+                // shadowing the real session. Drop it so the next login sticks.
+                drop_host_only = domain.is_some();
             }
             Err(e) => {
                 tracing::error!(error = ?e, "session validation failed");
             }
         }
     }
-    next.run(req).await
+    let mut res = next.run(req).await;
+    if drop_host_only {
+        expire_host_only_session(&mut res);
+    }
+    res
 }
 
 /// Redirects to /setup until first-run setup is complete, except for /setup and the auth flow.

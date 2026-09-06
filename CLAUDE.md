@@ -2,6 +2,8 @@
 
 Central SSO auth service for `../boom` and `../binkflix`. axum + sqlx (SQLite) + maud + htmx + josekit (RS256 JWT/JWKS). Supports GitHub and Google OAuth; either can be used to set up bastion, and a single bastion user can have multiple linked identities.
 
+A service integrates in one of two **modes** (`services.mode`): `redirect`, the JWT wire contract below, or `proxy`, where bastion reverse-proxies the app itself and it needs no knowledge of bastion.
+
 ## DB workflow: sqlx migrations
 
 Schema lives in `migrations/NNNN_<name>.sql`, applied via `sqlx::migrate!("./migrations")` from `src/db.rs::connect()` at startup. Each schema change is a new numbered file — never edit an applied migration in place, since `sqlx` records its checksum in `_sqlx_migrations` and a mismatch aborts boot.
@@ -11,6 +13,8 @@ To add a delta: create `migrations/NNNN_<name>.sql` (use the next free number), 
 ## Config lives in DB, not env
 
 Env vars: `DATABASE_PATH` (default `./data/bastion.db`), `ORIGIN` (optional; otherwise derived from `X-Forwarded-{Host,Proto}` / `Host`), `PORT` (default 5180), `RUST_LOG`. OAuth creds (GitHub and/or Google), services, first admin — all set via the `/setup` wizard, stored in DB. Post-setup, an admin can rotate or add provider creds from `/admin/providers`.
+
+Instance-wide settings that belong to no single service live in the `settings` key/value table (`src/settings.rs`); setting a key to `""` deletes it, so "unset" and "empty" are one state. Currently only `cookie_domain`.
 
 ## Setup state is derived, not stored
 
@@ -30,7 +34,32 @@ Pages are plain async handlers returning `maud::Markup`. Layouts compose via fun
 
 `<body hx-boost="true">` makes all link clicks and form submissions XHR-driven swaps of the body. Mutation handlers do their work and return `303 See Other`; the browser/htmx re-fetches the new page. No JSON API for the UI. Logout uses `hx-boost="false"` for a hard reload.
 
-## Wire contract (unchanged)
+## Proxy mode (`mode = 'proxy'`)
+
+bastion answers on the app's own hostname (`proxy_host`), checks the session and the grant, then forwards to `upstream_url` with the caller's identity attached as headers. The app needs no knowledge of bastion.
+
+`src/proxy.rs` holds the whole thing — decision plus transport. `proxy_gate` is a middleware layered *outside* `load_user` and `setup_gate` (a gated host is not part of bastion's UI and must not be redirected into the setup wizard) but *inside* the cookie layer, since it reads the session itself. Invariants worth keeping:
+
+- **The outbound header map is built from scratch, never edited.** `is_identity_header()` drops the entire `x-bastion-*` prefix plus the `remote-*` names before anything is copied across, so a client cannot smuggle in an identity header. Prefix matching is the point: a name added later is protected the moment it exists. This is the structural advantage over forward auth, where the equivalent has to be enumerated by hand in gateway config.
+- **Redirect targets are allowlisted.** `?redirect=` on `/auth/login` comes from a 401 on an attacker-reachable host. `validate_redirect()` requires the parsed host to *equal* a registered `proxy_host` — re-validated at every hop, including the hidden form field.
+- **Only navigations get redirected.** `wants_html()` gates it, so a `fetch()` or WebSocket handshake gets a bare 401 rather than an OAuth page.
+- **`upstream_url` is admin-only.** A self-registering service that could set its own upstream would turn bastion into an open proxy onto whatever the box can reach. `registration.rs` cannot touch it.
+- **bastion's session cookie never leaves bastion.** Proxy mode requires a `cookie_domain`, so the browser sends `bastion_session` to every gated host. It is a bearer credential — `validate_session_token` needs nothing else — so forwarding it would hand each app, its access logs and anything that compromises it a credential for bastion's own admin UI and every other gated app. `strip_bastion_cookies()` rebuilds the outbound `Cookie` header without it; the app's own cookies pass through untouched.
+- **Dot-segments are rejected outright.** `http::Uri` keeps the path verbatim and `glob_match`'s `*` spans `/`, so `/api/hooks/*` matched `/api/hooks/../../admin` — public path, no auth, forwarded un-normalized for the upstream to resolve back to `/admin`. `has_dot_segment()` runs before any routing decision and on every proxied request. Normalizing instead would be worse: normalize only for the match and the gap reopens; normalize both and the app silently sees a different path.
+- **Public URLs come from config, not the request.** `public_origin()` builds `(scheme, authority)` from the stored `proxy_host` plus `ORIGIN`'s scheme and port. Echoing the request would let a client pick the port (`request_host` strips it before matching, so `Host: app.example.com:1337` matches fine) and the scheme (`X-Forwarded-Proto` is unauthenticated), and any app that builds absolute URLs from `X-Forwarded-Host` — password-reset mail being the classic — would emit them. `request_host()` still strips the port for matching `proxy_host`; `request_authority()` remains only as the `ORIGIN`-unpinned fallback.
+- **Proxy mode sends no permissions.** A proxied app can't register a catalog, so the header would always be empty. The grant is the whole decision; `permissions`/`user_perms` remain redirect-mode only.
+
+Being in the data path makes streaming, upgrades and timeouts bastion's problem: bodies are streamed rather than buffered, a `101` splices both connections with `copy_bidirectional` (protocol-agnostic, so WebSockets and anything else on `Upgrade` both work), hop-by-hop headers are stripped in both directions, and there is deliberately no overall response timeout because SSE and WebSockets are long-lived. It also means bastion's uptime is the app's uptime.
+
+Authorization is re-read from the DB per request, so revoking a session or a grant applies immediately.
+
+### Cookie scoping
+
+bastion authenticates on its own hostname but serves the app on another, so the session cookie must carry `Domain=<parent>` (the `cookie_domain` setting) or it is never sent to the proxied host. `session::expire_host_only_session()` exists because `tower-cookies` keys removals by cookie *name*, so the jar can't clear the host-only and domain-scoped cookies at once; a leftover host-only cookie sorts first under RFC 6265 and would shadow every new session.
+
+Turning the setting on with sessions already live is the case to watch. `middleware::load_user` only clears a host-only leftover on the branch where it *fails* to validate — a leftover that still works never trips it, and the user then looks signed in on bastion while the gated host sees nothing, so `login_page`'s shortcut bounces them back and forth forever. `login_page` therefore re-issues the same token domain-scoped and expires the host-only copy before taking that shortcut, which fixes it in one pass with no re-login. `normalize_cookie_domain()` also refuses public suffixes, since a browser drops those silently and the symptom is indistinguishable.
+
+## Wire contract (`mode = 'redirect'`)
 
 Services redirect unauthenticated users to `${BASTION}/auth/login?service=<slug>`. bastion authenticates via whichever provider the user picked, checks the grant, and redirects to the service's registered Return URL with `?bastion_token=<RS256 JWT>` appended. Consumers verify via `/.well-known/jwks.json` or call `GET /api/introspect` for live revocation-sensitive checks. JWT claims: `sub` (stable identity hash derived from the user's frozen sub anchor), `iss`, `aud=<slug>`, `svc=<slug>`, `username`, `perms[]`, `bastion_uid`, `exp`, `iat`, `jti`.
 
@@ -41,4 +70,5 @@ Services redirect unauthenticated users to `${BASTION}/auth/login?service=<slug>
 - Phase 3: RS256 JWT + JWKS + `/api/introspect` ✅
 - First-run setup wizard ✅
 - Google OAuth + multi-provider identities + `/account` link/unlink ✅
-- Phase 4 (fine-grained per-service permissions): not started
+- Phase 4 (fine-grained per-service permissions) ✅
+- Proxy mode (bastion reverse-proxies gated apps; identity as headers) ✅

@@ -6,8 +6,10 @@ mod keys;
 mod middleware;
 mod models;
 mod oauth;
+mod proxy;
 mod routes;
 mod session;
+mod settings;
 mod setup;
 mod state;
 mod templates;
@@ -43,7 +45,11 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(db = %database_path, "connecting to sqlite");
     let pool = db::connect(&database_path).await?;
-    let state = AppState { pool, origin };
+    let state = AppState {
+        pool,
+        origin,
+        proxy: proxy::client(),
+    };
 
     let app = Router::new()
         // public
@@ -115,6 +121,10 @@ async fn main() -> anyhow::Result<()> {
             post(routes::admin::remove_service),
         )
         .route(
+            "/admin/services/proxy-settings",
+            post(routes::admin::proxy_settings_save),
+        )
+        .route(
             "/admin/services/approve-registration",
             post(routes::admin::approve_registration),
         )
@@ -149,6 +159,10 @@ async fn main() -> anyhow::Result<()> {
         // middleware
         .layer(axmw::from_fn_with_state(state.clone(), middleware::setup_gate))
         .layer(axmw::from_fn_with_state(state.clone(), middleware::load_user))
+        // Outside load_user and setup_gate — a gated host is not part of
+        // bastion's UI and must not be redirected into the setup wizard — but
+        // inside the cookie layer, since it reads the session itself.
+        .layer(axmw::from_fn_with_state(state.clone(), proxy::proxy_gate))
         .layer(CookieManagerLayer::new())
         .layer(TraceLayer::new_for_http())
         .with_state(state);

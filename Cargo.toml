@@ -10,6 +10,12 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "trace"] }
 tower-cookies = "0.10"
 
+# In-process reverse proxy for mode='proxy' services. reqwest can't do this:
+# splicing an Upgrade needs the raw connection on both sides.
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
+
 sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio", "chrono", "macros", "migrate"] }
 
 maud = { version = "0.26", features = ["axum"] }

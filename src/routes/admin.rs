@@ -1016,17 +1016,36 @@ pub async fn services_page(
     let host = host_from_origin(&origin_from(&state, &headers)).to_string();
     let counts = load_counts(&state).await?;
 
-    let rows: Vec<(i64, String, String, String, i64, i64)> = sqlx::query_as(
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(
+        i64,
+        String,
+        String,
+        String,
+        i64,
+        i64,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = sqlx::query_as(
         "SELECT s.id, s.slug, s.name, s.return_url,
                 (SELECT COUNT(*) FROM grants g WHERE g.service_id = s.id) AS user_count,
                 (SELECT COUNT(*) FROM permissions p
-                   WHERE p.service_id = s.id AND p.removed_at IS NULL) AS perm_count
+                   WHERE p.service_id = s.id AND p.removed_at IS NULL) AS perm_count,
+                s.mode, s.proxy_host, s.public_paths, s.upstream_url
          FROM services s
          WHERE s.deleted_at IS NULL AND s.status = 'approved'
          ORDER BY s.slug",
     )
     .fetch_all(&state.pool)
     .await?;
+
+    // Forward auth breaks silently without these two, and the symptom (a
+    // redirect loop, or a login page that never sticks) points nowhere near the
+    // cause, so surface them on the page that configures it.
+    let cookie_domain = crate::settings::cookie_domain(&state.pool).await;
+    let any_proxy = rows.iter().any(|r| r.6 == "proxy");
 
     let pending: Vec<(i64, String, String, String, Option<String>, Option<i64>)> = sqlx::query_as(
         "SELECT id, slug, name, return_url, public_jwk, registered_at
@@ -1188,21 +1207,30 @@ pub async fn services_page(
                 thead {
                     tr {
                         th { "Service" }
-                        th { "Return URL" }
+                        th { "Target" }
                         th { "Grants" }
                         th { "Perms" }
                         th {}
                     }
                 }
                 tbody {
-                    @for (id, slug, name, ret, n, perm_n) in &rows {
+                    @for (id, slug, name, ret, n, perm_n, mode, phost, ppaths, upstream) in &rows {
+                        @let is_proxy = mode == "proxy";
                         tr {
                             td {
-                                div.mono style="font-size:13px;font-weight:500" { (slug) }
+                                div.mono style="font-size:13px;font-weight:500" {
+                                    (slug)
+                                    @if is_proxy {
+                                        span style="margin-left:8px;font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:var(--fg-mute)" { "proxy" }
+                                    }
+                                }
                                 div.mono style="font-size:11px;color:var(--fg-mute)" { "aud:" (slug) " · " (name) }
                             }
                             td.mono style="font-size:12px;color:var(--fg-mid);max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" {
-                                (ret)
+                                @if is_proxy {
+                                    (phost.as_deref().unwrap_or("—"))
+                                    span style="color:var(--fg-mute)" { " → " (upstream.as_deref().unwrap_or("no upstream")) }
+                                } @else { (ret) }
                             }
                             td.mono style="font-size:13px;color:var(--fg)" { (n) }
                             td.mono style="font-size:13px;color:var(--fg)" { (perm_n) }
@@ -1221,7 +1249,33 @@ pub async fn services_page(
                                         input type="hidden" name="id" value=(id);
                                         label.field { "Slug" input.input name="slug" value=(slug) required; }
                                         label.field { "Name" input.input name="name" value=(name); }
-                                        label.field { "Return URL" input.input name="returnUrl" value=(ret) required type="url"; }
+                                        label.field {
+                                            "Mode"
+                                            select.input name="mode" {
+                                                option value="redirect" selected[!is_proxy] { "redirect — service verifies a JWT" }
+                                                option value="proxy" selected[is_proxy] { "proxy — bastion serves the app itself" }
+                                            }
+                                        }
+                                        label.field {
+                                            "Public hostname (proxy mode)"
+                                            input.input name="proxyHost" value=(phost.as_deref().unwrap_or("")) placeholder="app.example.com";
+                                        }
+                                        label.field {
+                                            "Upstream (proxy mode)"
+                                            input.input name="upstreamUrl" value=(upstream.as_deref().unwrap_or("")) placeholder="http://127.0.0.1:8080";
+                                        }
+                                        label.field {
+                                            "Return URL (redirect mode)"
+                                            input.input name="returnUrl" value=(ret);
+                                        }
+                                        label.field {
+                                            "Public paths (proxy mode, one per line)"
+                                            textarea.input name="publicPaths" rows="3"
+                                                placeholder="/health&#10;/api/webhooks/*"
+                                                style="font-family:var(--font-mono);font-size:12px" {
+                                                (ppaths.as_deref().unwrap_or(""))
+                                            }
+                                        }
                                         div.row-actions style="margin-top:6px" {
                                             button.btn.primary type="submit" { "Save" }
                                             button.btn.danger type="submit"
@@ -1283,6 +1337,43 @@ pub async fn services_page(
             }
         }
 
+        h2 id="proxy-mode" style="font-size:14px;margin-top:32px;margin-bottom:12px;font-family:var(--font-mono);color:var(--fg-mute);text-transform:uppercase;letter-spacing:0.06em" { "Proxy mode" }
+        p.admin-desc style="margin-top:-6px" {
+            "In proxy mode bastion answers on the app's own hostname, checks the session "
+            "and the grant, and forwards the request upstream with the caller's identity "
+            "attached as headers. Point that hostname's DNS and TLS at bastion. Because "
+            "sign-in happens on bastion's own hostname, the session cookie has to be scoped "
+            "to a parent domain covering both — otherwise it is never sent to the app and "
+            "every request looks signed out."
+        }
+        div.table-wrap style="padding:20px;background:var(--bg-elev)" {
+            @if any_proxy && cookie_domain.is_none() {
+                div style="margin-bottom:14px;padding:10px 12px;border-left:2px solid var(--fg-mute);font-size:12px;color:var(--fg-mid)" {
+                    strong { "Cookie domain not set." }
+                    " Proxy-mode services are configured but sessions are host-only, so every proxied request will look signed out."
+                }
+            }
+            @if any_proxy && state.origin.is_none() {
+                div style="margin-bottom:14px;padding:10px 12px;border-left:2px solid var(--fg-mute);font-size:12px;color:var(--fg-mid)" {
+                    strong { "ORIGIN is not set." }
+                    " Login redirects are guessed from the request's Host header, which on a "
+                    "proxied request is the app's hostname, not bastion's. Pin it."
+                }
+            }
+            form method="post" action="/admin/services/proxy-settings" style="display:grid;gap:10px;max-width:520px" {
+                label.field {
+                    "Session cookie domain"
+                    input.input name="cookieDomain" value=(cookie_domain.as_deref().unwrap_or("")) placeholder=".example.com";
+                }
+                div style="font-size:11px;color:var(--fg-mute);margin-top:-4px" {
+                    "Leave empty for host-only cookies (correct when nothing is proxied). "
+                    "Setting this shares the session with every subdomain, so only use a domain you control end to end."
+                }
+                div style="margin-top:6px" { button.btn.primary type="submit" { "Save" } }
+            }
+
+        }
+
         h2 id="add-service" style="font-size:14px;margin-top:32px;margin-bottom:12px;font-family:var(--font-mono);color:var(--fg-mute);text-transform:uppercase;letter-spacing:0.06em" { "Pre-provision a service (manual)" }
         p.admin-desc style="margin-top:-6px" {
             "Use this only when a service can't self-register. Most services should POST to /api/services/register on first boot."
@@ -1291,7 +1382,16 @@ pub async fn services_page(
             form method="post" action="/admin/services/add" style="display:grid;gap:10px;max-width:520px" {
                 label.field { "Slug (lowercase, dashes ok)" input.input name="slug" required title="lowercase letters, digits, and hyphens"; }
                 label.field { "Name" input.input name="name"; }
-                label.field { "Return URL" input.input name="returnUrl" required type="url"; }
+                label.field {
+                    "Mode"
+                    select.input name="mode" {
+                        option value="redirect" { "redirect — service verifies a JWT" }
+                        option value="proxy" { "proxy — bastion serves the app itself" }
+                    }
+                }
+                label.field { "Public hostname (proxy mode)" input.input name="proxyHost" placeholder="app.example.com"; }
+                label.field { "Upstream (proxy mode)" input.input name="upstreamUrl" placeholder="http://127.0.0.1:8080"; }
+                label.field { "Return URL (redirect mode)" input.input name="returnUrl"; }
                 div style="margin-top:6px" { button.btn.primary type="submit" { "Add service" } }
             }
         }
@@ -1317,8 +1417,14 @@ pub struct ServiceForm {
     pub slug: String,
     #[serde(default)]
     pub name: String,
-    #[serde(rename = "returnUrl")]
+    #[serde(rename = "returnUrl", default)]
     pub return_url: String,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(rename = "proxyHost", default)]
+    pub proxy_host: Option<String>,
+    #[serde(rename = "upstreamUrl", default)]
+    pub upstream_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1327,27 +1433,126 @@ pub struct ServiceUpdateForm {
     pub slug: String,
     #[serde(default)]
     pub name: String,
-    #[serde(rename = "returnUrl")]
+    #[serde(rename = "returnUrl", default)]
     pub return_url: String,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(rename = "proxyHost", default)]
+    pub proxy_host: Option<String>,
+    #[serde(rename = "upstreamUrl", default)]
+    pub upstream_url: Option<String>,
+    #[serde(rename = "publicPaths", default)]
+    pub public_paths: Option<String>,
 }
 
-fn validate(slug: &str, name: &str, return_url: &str) -> Result<(String, String, String), String> {
+pub struct ServiceFields {
+    pub slug: String,
+    pub name: String,
+    pub return_url: String,
+    pub mode: String,
+    pub proxy_host: Option<String>,
+    pub upstream_url: Option<String>,
+}
+
+/// Reduce a hostname field to a bare host: no scheme, path, port or trailing
+/// dot. `proxy_host` is compared for equality against the `Host` a gateway
+/// forwards and against a redirect target's parsed host, so anything stored
+/// with extra syntax simply never matches.
+fn normalize_host(raw: &str) -> Result<String, String> {
+    let mut h = raw.trim().to_ascii_lowercase();
+    if let Some(rest) = h.split("://").nth(1) {
+        h = rest.to_string();
+    }
+    h = h.split('/').next().unwrap_or("").to_string();
+    h = h.split(':').next().unwrap_or("").to_string();
+    let h = h.trim_matches('.').to_string();
+    if h.is_empty() {
+        return Err("public hostname required for proxy mode".into());
+    }
+    if !h
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    {
+        return Err("public hostname contains invalid characters".into());
+    }
+    Ok(h)
+}
+
+fn validate(
+    slug: &str,
+    name: &str,
+    return_url: &str,
+    mode: Option<&str>,
+    proxy_host: Option<&str>,
+    upstream_url: Option<&str>,
+) -> Result<ServiceFields, String> {
     let slug = slug.trim().to_string();
     let name = {
         let n = name.trim();
         if n.is_empty() { slug.clone() } else { n.to_string() }
     };
-    let return_url = return_url.trim().to_string();
-    if slug.is_empty() || return_url.is_empty() {
-        return Err("slug and return url required".into());
+    if slug.is_empty() {
+        return Err("slug required".into());
     }
     if !slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
         return Err("slug must be lowercase alphanumeric + dashes".into());
     }
+
+    let mode = match mode.map(str::trim).unwrap_or("redirect") {
+        "" | "redirect" => "redirect",
+        "proxy" => "proxy",
+        _ => return Err("mode must be redirect or proxy".into()),
+    }
+    .to_string();
+
+    let mut return_url = return_url.trim().to_string();
+    let mut upstream = None;
+    let proxy_host = if mode == "proxy" {
+        let host = normalize_host(proxy_host.unwrap_or(""))?;
+
+        // Admin-only, and never settable by a self-registering service: an
+        // attacker-chosen upstream would turn bastion into an open proxy onto
+        // whatever the box can reach.
+        let u = upstream_url.unwrap_or("").trim().to_string();
+        if u.is_empty() {
+            return Err("upstream URL required for proxy mode".into());
+        }
+        let parsed = match url::Url::parse(&u) {
+            Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => parsed,
+            Ok(_) => return Err("upstream URL must be http or https".into()),
+            Err(_) => return Err("upstream URL must be a valid URL".into()),
+        };
+        // Compare hosts, not string suffixes: `ends_with` called
+        // http://myapp.example.com a loop against app.example.com, and missed
+        // the real one at https://app.example.com:443/ because the port breaks
+        // the suffix test.
+        if parsed
+            .host_str()
+            .map(|h| h.trim_end_matches('.').eq_ignore_ascii_case(&host))
+            .unwrap_or(false)
+        {
+            return Err("upstream URL points back at the public hostname — that is a loop".into());
+        }
+        upstream = Some(u);
+        // A proxied app is reached at its own hostname, so that *is* the place
+        // to land after login. Keeping return_url populated also means
+        // /launch/<slug> and the pending page's "try again" keep working
+        // unchanged for both modes.
+        if return_url.is_empty() {
+            return_url = format!("https://{}/", host);
+        }
+        Some(host)
+    } else {
+        None
+    };
+
+    if return_url.is_empty() {
+        return Err("return url required for redirect mode".into());
+    }
     if url::Url::parse(&return_url).is_err() {
         return Err("return url must be a valid URL".into());
     }
-    Ok((slug, name, return_url))
+    Ok(ServiceFields { slug, name, return_url, mode, proxy_host, upstream_url: upstream })
 }
 
 pub async fn add_service(
@@ -1357,15 +1562,27 @@ pub async fn add_service(
 ) -> AppResult<Response> {
     let user = user.map(|Extension(u)| u);
     let admin = require_admin(user.as_ref())?.clone();
-    let (slug, name, return_url) =
-        validate(&f.slug, &f.name, &f.return_url).map_err(AppError::BadRequest)?;
+    let v = validate(
+        &f.slug,
+        &f.name,
+        &f.return_url,
+        f.mode.as_deref(),
+        f.proxy_host.as_deref(),
+        f.upstream_url.as_deref(),
+    )
+    .map_err(AppError::BadRequest)?;
+    let (slug, name, return_url) = (v.slug, v.name, v.return_url);
     let inserted: Option<(i64,)> = sqlx::query_as(
-        "INSERT INTO services (slug, name, return_url) VALUES (?, ?, ?)
+        "INSERT INTO services (slug, name, return_url, mode, proxy_host, upstream_url)
+         VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(slug) WHERE deleted_at IS NULL DO NOTHING RETURNING id",
     )
     .bind(&slug)
     .bind(&name)
     .bind(&return_url)
+    .bind(&v.mode)
+    .bind(&v.proxy_host)
+    .bind(&v.upstream_url)
     .fetch_optional(&state.pool)
     .await?;
     let Some((sid,)) = inserted else {
@@ -1400,15 +1617,37 @@ pub async fn update_service(
 ) -> AppResult<Response> {
     let user = user.map(|Extension(u)| u);
     let admin = require_admin(user.as_ref())?.clone();
-    let (slug, name, return_url) =
-        validate(&f.slug, &f.name, &f.return_url).map_err(AppError::BadRequest)?;
-    sqlx::query("UPDATE services SET slug = ?, name = ?, return_url = ? WHERE id = ?")
-        .bind(&slug)
-        .bind(&name)
-        .bind(&return_url)
-        .bind(f.id)
-        .execute(&state.pool)
-        .await?;
+    let v = validate(
+        &f.slug,
+        &f.name,
+        &f.return_url,
+        f.mode.as_deref(),
+        f.proxy_host.as_deref(),
+        f.upstream_url.as_deref(),
+    )
+    .map_err(AppError::BadRequest)?;
+    let (slug, name, return_url) = (v.slug, v.name, v.return_url);
+    let public_paths = f
+        .public_paths
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && v.mode == "proxy");
+    sqlx::query(
+        "UPDATE services
+         SET slug = ?, name = ?, return_url = ?, mode = ?,
+             proxy_host = ?, upstream_url = ?, public_paths = ?
+         WHERE id = ?",
+    )
+    .bind(&slug)
+    .bind(&name)
+    .bind(&return_url)
+    .bind(&v.mode)
+    .bind(&v.proxy_host)
+    .bind(&v.upstream_url)
+    .bind(public_paths)
+    .bind(f.id)
+    .execute(&state.pool)
+    .await?;
     audit(
         &state.pool,
         Some(admin.id),
@@ -1814,4 +2053,94 @@ pub async fn providers_clear(
     .await
     .map_err(AppError::Other)?;
     Ok(Redirect::to("/admin/providers").into_response())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProxySettingsForm {
+    #[serde(rename = "cookieDomain", default)]
+    pub cookie_domain: String,
+}
+
+pub async fn proxy_settings_save(
+    State(state): State<AppState>,
+    user: Option<Extension<UserCtx>>,
+    Form(f): Form<ProxySettingsForm>,
+) -> AppResult<Response> {
+    let user = user.map(|Extension(u)| u);
+    let admin = require_admin(user.as_ref())?.clone();
+    let domain =
+        crate::settings::normalize_cookie_domain(&f.cookie_domain).map_err(AppError::BadRequest)?;
+    crate::settings::set(&state.pool, crate::settings::COOKIE_DOMAIN, &domain)
+        .await
+        .map_err(AppError::Other)?;
+    audit(
+        &state.pool,
+        Some(admin.id),
+        "settings.cookie_domain",
+        None,
+        Some(serde_json::json!({ "value": domain })),
+    )
+    .await
+    .map_err(AppError::Other)?;
+    Ok(Redirect::to("/admin/services#proxy-mode").into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate;
+
+    fn proxy(host: &str, upstream: &str) -> Result<super::ServiceFields, String> {
+        validate("demo", "Demo", "", Some("proxy"), Some(host), Some(upstream))
+    }
+
+    #[test]
+    fn upstream_loop_check_compares_hosts_not_suffixes() {
+        // The suffix test this replaced got both directions wrong.
+        // False positive: a different host that merely ends with the same text.
+        assert!(proxy("app.example.com", "http://myapp.example.com").is_ok());
+        // False negative: the real loop, missed because the port broke the
+        // suffix match.
+        assert!(proxy("app.example.com", "https://app.example.com:443/").is_err());
+
+        assert!(proxy("app.example.com", "http://app.example.com").is_err());
+        assert!(proxy("app.example.com", "http://app.example.com./x").is_err());
+        assert!(proxy("app.example.com", "http://APP.example.com").is_err());
+        assert!(proxy("app.example.com", "http://127.0.0.1:8080").is_ok());
+    }
+
+    #[test]
+    fn proxy_mode_requires_a_usable_upstream() {
+        assert!(proxy("app.example.com", "").is_err());
+        assert!(proxy("app.example.com", "ftp://host/x").is_err());
+        assert!(proxy("app.example.com", "not a url").is_err());
+        assert!(validate("demo", "", "", Some("proxy"), Some(""), Some("http://x:1")).is_err());
+    }
+
+    #[test]
+    fn proxy_fields_are_cleared_in_redirect_mode() {
+        // Otherwise a service flipped back to redirect keeps a live proxy_host,
+        // and its unique index keeps that hostname claimed.
+        let v = validate(
+            "demo",
+            "Demo",
+            "https://demo.example.com/cb",
+            Some("redirect"),
+            Some("app.example.com"),
+            Some("http://127.0.0.1:8080"),
+        )
+        .unwrap();
+        assert_eq!(v.mode, "redirect");
+        assert!(v.proxy_host.is_none());
+        assert!(v.upstream_url.is_none());
+        assert_eq!(v.return_url, "https://demo.example.com/cb");
+    }
+
+    #[test]
+    fn proxy_mode_defaults_return_url_to_the_public_host() {
+        // /launch/<slug> and the pending page's "try again" both go through
+        // return_url, so it has to be populated in either mode.
+        let v = proxy("app.example.com", "http://127.0.0.1:8080").unwrap();
+        assert_eq!(v.return_url, "https://app.example.com/");
+        assert_eq!(v.proxy_host.as_deref(), Some("app.example.com"));
+    }
 }

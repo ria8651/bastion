@@ -6,7 +6,7 @@ use tower_cookies::{cookie::SameSite, Cookie, Cookies};
 
 use crate::setup::OAuthConfig;
 
-const STATE_COOKIE: &str = "bastion_oauth_state";
+pub const STATE_COOKIE: &str = "bastion_oauth_state";
 const STATE_TTL_SECONDS: i64 = 10 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +48,11 @@ pub struct OAuthState {
     pub claim_admin: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_to_user_id: Option<i64>,
+    /// Absolute URL on a gated host to return to after login, carried through
+    /// the OAuth round trip. Re-validated against the registered proxy hosts
+    /// before use — see `proxy::validate_redirect`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect: Option<String>,
 }
 
 pub fn generate_state() -> String {

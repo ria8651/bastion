@@ -209,6 +209,7 @@ pub async fn link_post(
             service: None,
             claim_admin: None,
             link_to_user_id: Some(user.id),
+            redirect: None,
         },
         is_secure(&state, &headers),
     );

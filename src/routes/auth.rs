@@ -29,6 +29,8 @@ use crate::templates::{landing_page, provider_icon};
 pub struct LoginQuery {
     pub service: Option<String>,
     pub claim_admin: Option<String>,
+    /// Set by proxy mode: the gated URL the user was originally after.
+    pub redirect: Option<String>,
 }
 
 /// Returns the active permission keys granted to `user_id` on `service_id`.
@@ -54,10 +56,81 @@ async fn load_user_perms(
 
 pub async fn login_page(
     State(state): State<AppState>,
+    headers: HeaderMap,
+    cookies: Cookies,
     Query(q): Query<LoginQuery>,
-    _user: Option<Extension<UserCtx>>,
+    user: Option<Extension<UserCtx>>,
 ) -> AppResult<Response> {
     let claim_admin = q.claim_admin.as_deref() == Some("1");
+
+    // Re-scope a session that predates `cookie_domain`.
+    //
+    // Turning the setting on leaves existing sessions on a host-only cookie.
+    // The browser still sends it here — and RFC 6265 sorts it first, so it is
+    // the one read — while the gated host gets nothing. The user therefore
+    // looks signed in, the shortcut below bounces them back to the app, the app
+    // 401s them here again, and round it goes until the old session expires.
+    // `middleware::load_user` cannot break this: its `expire_host_only_session`
+    // call sits on the branch where the cookie fails to validate, and this one
+    // validates perfectly well.
+    //
+    // Re-issuing the same token domain-scoped fixes it in one pass with no
+    // re-login, and the host-only copy is expired alongside so it stops
+    // shadowing. Deletion matches on (name, domain, path), so that removal
+    // cannot touch the domain-scoped cookie just set.
+    let mut rescoped_cookie = false;
+    if let Some(domain) = crate::settings::cookie_domain(&state.pool).await {
+        if let Some(token) = read_session_cookie(&cookies) {
+            if let Some(exp) = crate::session::session_expiry(&state.pool, &token).await {
+                set_session_cookie(
+                    &cookies,
+                    &token,
+                    is_secure(&state, &headers),
+                    exp,
+                    Some(&domain),
+                );
+                rescoped_cookie = true;
+            }
+        }
+    }
+    let finish = |res: Response| -> Response {
+        let mut res = res;
+        if rescoped_cookie {
+            crate::session::expire_host_only_session(&mut res);
+        }
+        res
+    };
+
+    // A gated app 401s every request until the session cookie exists, so the
+    // redirect target is attacker-supplied by construction. Nothing downstream
+    // may use it before it has been matched against a registered proxy host.
+    let redirect = match q.redirect.as_deref() {
+        Some(r) => {
+            crate::proxy::validate_redirect(&state.pool, r, q.service.as_deref()).await
+        }
+        None => None,
+    };
+
+    // Already signed in and allowed through — this is the common case when a
+    // second gated app 401s a browser that already has a bastion session, and
+    // showing a provider picker there would be a pointless extra click.
+    if let (Some(Extension(u)), Some(dest), false) = (&user, &redirect, claim_admin) {
+        if u.status == "active" && q.service.is_some() {
+            let granted: Option<(i64,)> = sqlx::query_as(
+                "SELECT g.user_id FROM grants g
+                 JOIN services s ON s.id = g.service_id
+                 WHERE g.user_id = ? AND s.slug = ?
+                   AND s.status = 'approved' AND s.deleted_at IS NULL",
+            )
+            .bind(u.id)
+            .bind(q.service.as_deref().unwrap_or_default())
+            .fetch_optional(&state.pool)
+            .await?;
+            if granted.is_some() {
+                return Ok(finish(Redirect::to(dest).into_response()));
+            }
+        }
+    }
 
     // service lookup (display only)
     let svc_row: Option<(String, String)> = if let Some(slug) = q.service.as_deref() {
@@ -154,6 +227,9 @@ pub async fn login_page(
                         @if claim_admin {
                             input type="hidden" name="claim_admin" value="1";
                         }
+                        @if let Some(r) = &redirect {
+                            input type="hidden" name="redirect" value=(r);
+                        }
                         input type="hidden" name="provider" value=(p.as_str());
                         button.provider-btn type="submit" disabled[buttons_disabled] {
                             (provider_icon(p.as_str()))
@@ -180,7 +256,7 @@ pub async fn login_page(
             }
         }
     };
-    Ok(landing_page("Sign in", card).into_response())
+    Ok(finish(landing_page("Sign in", card).into_response()))
 }
 
 fn initials_two(slug: &str) -> String {
@@ -197,6 +273,7 @@ pub struct LoginForm {
     pub service: Option<String>,
     pub claim_admin: Option<String>,
     pub provider: String,
+    pub redirect: Option<String>,
 }
 
 pub async fn login_post(
@@ -224,6 +301,15 @@ pub async fn login_post(
         }
     }
 
+    // Re-validated rather than trusted from the form: the hidden field is as
+    // forgeable as the query parameter it came from.
+    let redirect = match f.redirect.as_deref() {
+        Some(r) => {
+            crate::proxy::validate_redirect(&state.pool, r, f.service.as_deref()).await
+        }
+        None => None,
+    };
+
     let origin = origin_from(&state, &headers);
     let redirect_uri = format!("{}/auth/callback", origin);
     let s = generate_state();
@@ -235,6 +321,7 @@ pub async fn login_post(
             service: f.service.clone(),
             claim_admin: if claim_admin { Some(true) } else { None },
             link_to_user_id: None,
+            redirect,
         },
         is_secure(&state, &headers),
     );
@@ -484,7 +571,14 @@ pub async fn callback(
     )
     .await
     .map_err(AppError::Other)?;
-    set_session_cookie(&cookies, &token, is_secure(&state, &headers), exp);
+    let cookie_domain = crate::settings::cookie_domain(&state.pool).await;
+    set_session_cookie(
+        &cookies,
+        &token,
+        is_secure(&state, &headers),
+        exp,
+        cookie_domain.as_deref(),
+    );
 
     if claim_admin {
         return Ok(Redirect::to("/setup").into_response());
@@ -500,14 +594,14 @@ pub async fn callback(
 
     // Active user — if a service redirect, mint a token from the frozen sub anchor.
     if let Some(svc_slug) = stored.service.as_deref() {
-        let svc: Option<(i64, String, String)> = sqlx::query_as(
-            "SELECT id, slug, return_url FROM services
+        let svc: Option<(i64, String, String, String)> = sqlx::query_as(
+            "SELECT id, slug, return_url, mode FROM services
              WHERE slug = ? AND deleted_at IS NULL AND status = 'approved'",
         )
         .bind(svc_slug)
         .fetch_optional(&state.pool)
         .await?;
-        if let Some((svc_id, slug, return_url)) = svc {
+        if let Some((svc_id, slug, return_url, mode)) = svc {
             let granted: Option<(i64,)> =
                 sqlx::query_as("SELECT user_id FROM grants WHERE user_id = ? AND service_id = ?")
                     .bind(user_id)
@@ -515,6 +609,19 @@ pub async fn callback(
                     .fetch_optional(&state.pool)
                     .await?;
             if granted.is_some() {
+                // Proxied apps get no token: bastion checks the session it
+                // just created on the very next request to the gated host.
+                if mode == "proxy" {
+                    let dest = match stored.redirect.as_deref() {
+                        Some(r) => {
+                            crate::proxy::validate_redirect(&state.pool, r, Some(&slug))
+                                .await
+                                .unwrap_or(return_url)
+                        }
+                        None => return_url,
+                    };
+                    return Ok(Redirect::to(&dest).into_response());
+                }
                 let u: (String, String, String) = sqlx::query_as(
                     "SELECT username, sub_anchor_provider, sub_anchor_provider_id
                      FROM users WHERE id = ?",
@@ -688,14 +795,14 @@ pub async fn launch(
         return Ok(Redirect::to(&path).into_response());
     }
 
-    let svc: Option<(i64, String, String)> = sqlx::query_as(
-        "SELECT id, slug, return_url FROM services
+    let svc: Option<(i64, String, String, String)> = sqlx::query_as(
+        "SELECT id, slug, return_url, mode FROM services
          WHERE slug = ? AND deleted_at IS NULL AND status = 'approved'",
     )
     .bind(&slug)
     .fetch_optional(&state.pool)
     .await?;
-    let Some((svc_id, svc_slug, return_url)) = svc else {
+    let Some((svc_id, svc_slug, return_url, mode)) = svc else {
         return Err(AppError::NotFound);
     };
 
@@ -711,6 +818,10 @@ pub async fn launch(
             urlencoding::encode(&svc_slug)
         ))
         .into_response());
+    }
+
+    if mode == "proxy" {
+        return Ok(Redirect::to(&return_url).into_response());
     }
 
     let origin = origin_from(&state, &headers);
@@ -742,6 +853,11 @@ pub async fn logout(State(state): State<AppState>, cookies: Cookies) -> AppResul
             .await
             .map_err(AppError::Other)?;
     }
-    clear_session_cookie(&cookies);
-    Ok(Redirect::to("/").into_response())
+    let cookie_domain = crate::settings::cookie_domain(&state.pool).await;
+    clear_session_cookie(&cookies, cookie_domain.as_deref());
+    let mut res = Redirect::to("/").into_response();
+    if cookie_domain.is_some() {
+        crate::session::expire_host_only_session(&mut res);
+    }
+    Ok(res)
 }
