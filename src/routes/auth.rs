@@ -18,7 +18,7 @@ use crate::oauth::{
     read_state_cookie, set_state_cookie, OAuthState, Provider, RemoteUser,
 };
 use crate::session::{
-    clear_session_cookie, create_session, generate_session_token, invalidate_session,
+    create_session, generate_session_token, invalidate_session,
     read_session_cookie, set_session_cookie,
 };
 use crate::setup::get_oauth_config;
@@ -65,19 +65,20 @@ pub async fn login_page(
 
     // Re-scope a session that predates `cookie_domain`.
     //
-    // Turning the setting on leaves existing sessions on a host-only cookie.
-    // The browser still sends it here — and RFC 6265 sorts it first, so it is
-    // the one read — while the gated host gets nothing. The user therefore
-    // looks signed in, the shortcut below bounces them back to the app, the app
-    // 401s them here again, and round it goes until the old session expires.
-    // `middleware::load_user` cannot break this: its `expire_host_only_session`
-    // call sits on the branch where the cookie fails to validate, and this one
-    // validates perfectly well.
+    // Turning the setting on leaves existing sessions on a host-only cookie,
+    // and at that point it is the *only* `bastion_session` the browser holds —
+    // so bastion reads it here and the user looks signed in, while the gated
+    // host, which the cookie is not scoped to, gets nothing. The shortcut below
+    // then bounces them back to the app, the app sends them here again, and
+    // round it goes until the old session expires. `middleware::load_user`
+    // cannot break the cycle: its `expire_host_only_session` call sits on the
+    // branch where the cookie fails to validate, and this one validates fine.
     //
     // Re-issuing the same token domain-scoped fixes it in one pass with no
-    // re-login, and the host-only copy is expired alongside so it stops
-    // shadowing. Deletion matches on (name, domain, path), so that removal
-    // cannot touch the domain-scoped cookie just set.
+    // re-login. The host-only copy is expired alongside as housekeeping — it
+    // would lose to the new cookie regardless, since `add_original` replaces by
+    // name and RFC 6265 sends the older one first. Deletion matches on (name,
+    // domain, path), so that removal cannot touch the cookie just set.
     let mut rescoped_cookie = false;
     if let Some(domain) = crate::settings::cookie_domain(&state.pool).await {
         if let Some(token) = read_session_cookie(&cookies) {
@@ -116,17 +117,13 @@ pub async fn login_page(
     // showing a provider picker there would be a pointless extra click.
     if let (Some(Extension(u)), Some(dest), false) = (&user, &redirect, claim_admin) {
         if u.status == "active" && q.service.is_some() {
-            let granted: Option<(i64,)> = sqlx::query_as(
-                "SELECT g.user_id FROM grants g
-                 JOIN services s ON s.id = g.service_id
-                 WHERE g.user_id = ? AND s.slug = ?
-                   AND s.status = 'approved' AND s.deleted_at IS NULL",
+            let granted = crate::grants::is_granted_slug(
+                &state.pool,
+                u.id,
+                q.service.as_deref().unwrap_or_default(),
             )
-            .bind(u.id)
-            .bind(q.service.as_deref().unwrap_or_default())
-            .fetch_optional(&state.pool)
             .await?;
-            if granted.is_some() {
+            if granted {
                 return Ok(finish(Redirect::to(dest).into_response()));
             }
         }
@@ -519,13 +516,7 @@ pub async fn callback(
         .fetch_optional(&state.pool)
                 .await?;
         if let Some((svc_id,)) = svc {
-            let granted: Option<(i64,)> =
-                sqlx::query_as("SELECT user_id FROM grants WHERE user_id = ? AND service_id = ?")
-                    .bind(user_id)
-                    .bind(svc_id)
-                    .fetch_optional(&state.pool)
-                    .await?;
-            if granted.is_none() {
+            if !crate::grants::is_granted(&state.pool, user_id, svc_id).await? {
                 let pending: Option<(i64,)> = sqlx::query_as(
                     "SELECT id FROM access_requests
                      WHERE user_id = ? AND service_id = ? AND resolved_at IS NULL",
@@ -602,13 +593,7 @@ pub async fn callback(
         .fetch_optional(&state.pool)
         .await?;
         if let Some((svc_id, slug, return_url, mode)) = svc {
-            let granted: Option<(i64,)> =
-                sqlx::query_as("SELECT user_id FROM grants WHERE user_id = ? AND service_id = ?")
-                    .bind(user_id)
-                    .bind(svc_id)
-                    .fetch_optional(&state.pool)
-                    .await?;
-            if granted.is_some() {
+            if crate::grants::is_granted(&state.pool, user_id, svc_id).await? {
                 // Proxied apps get no token: bastion checks the session it
                 // just created on the very next request to the gated host.
                 if mode == "proxy" {
@@ -806,13 +791,7 @@ pub async fn launch(
         return Err(AppError::NotFound);
     };
 
-    let granted: Option<(i64,)> =
-        sqlx::query_as("SELECT user_id FROM grants WHERE user_id = ? AND service_id = ?")
-            .bind(user.id)
-            .bind(svc_id)
-            .fetch_optional(&state.pool)
-            .await?;
-    if granted.is_none() {
+    if !crate::grants::is_granted(&state.pool, user.id, svc_id).await? {
         return Ok(Redirect::to(&format!(
             "/pending?service={}",
             urlencoding::encode(&svc_slug)
@@ -854,10 +833,7 @@ pub async fn logout(State(state): State<AppState>, cookies: Cookies) -> AppResul
             .map_err(AppError::Other)?;
     }
     let cookie_domain = crate::settings::cookie_domain(&state.pool).await;
-    clear_session_cookie(&cookies, cookie_domain.as_deref());
     let mut res = Redirect::to("/").into_response();
-    if cookie_domain.is_some() {
-        crate::session::expire_host_only_session(&mut res);
-    }
+    crate::session::clear_session_everywhere(&cookies, &mut res, cookie_domain.as_deref());
     Ok(res)
 }

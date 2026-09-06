@@ -54,17 +54,23 @@ pub async fn cookie_domain(pool: &SqlitePool) -> Option<String> {
 /// Normalises user input into a cookie `Domain` attribute: strips a scheme,
 /// port, path and any leading dot, then re-adds the dot. Returns an error
 /// string if what's left isn't a plausible domain.
-pub fn normalize_cookie_domain(raw: &str) -> Result<String, String> {
-    let mut s = raw.trim().to_ascii_lowercase();
-    if s.is_empty() {
+/// Normalise a cookie domain, checking it can actually hold bastion's session.
+///
+/// `bastion_host` is the host from `ORIGIN`; `None` when unpinned, in which
+/// case the coverage check is skipped because there is nothing to check
+/// against.
+///
+/// A browser silently discards a `Domain` that does not cover the host setting
+/// it, so a domain like `other.com` set from `bastion.example.com` locks
+/// everyone out of bastion entirely — and `login_page` then re-issues the
+/// session under that dead domain and expires the working host-only copy, so
+/// the admin loses their own session on the next page load. Recovery at that
+/// point means editing SQLite by hand. Refusing up front is the whole defence.
+pub fn normalize_cookie_domain(raw: &str, bastion_host: Option<&str>) -> Result<String, String> {
+    if raw.trim().is_empty() {
         return Ok(String::new());
     }
-    if let Some(rest) = s.split("://").nth(1) {
-        s = rest.to_string();
-    }
-    s = s.split('/').next().unwrap_or("").to_string();
-    s = s.split(':').next().unwrap_or("").to_string();
-    let s = s.trim_start_matches('.').trim_end_matches('.').to_string();
+    let s = crate::host::bare(raw);
     if s.is_empty() || !s.contains('.') {
         return Err("cookie domain must be a parent domain like example.com".into());
     }
@@ -81,8 +87,22 @@ pub fn normalize_cookie_domain(raw: &str) -> Result<String, String> {
             s, s
         ));
     }
+    if let Some(host) = bastion_host {
+        let host = crate::host::bare(host);
+        if !crate::host::covers(&s, &host) {
+            return Err(format!(
+                "bastion is served from {}, which is not under {} — a browser \
+                 would discard the cookie and nobody could sign in. Use {} or a \
+                 domain it sits under.",
+                host,
+                s,
+                host.split_once('.').map(|(_, parent)| parent).unwrap_or(&host)
+            ));
+        }
+    }
     Ok(format!(".{}", s))
 }
+
 
 /// Common multi-label public suffixes.
 ///
@@ -111,7 +131,32 @@ fn is_public_suffix(domain: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_cookie_domain;
+    use super::normalize_cookie_domain as norm_with_host;
+
+    /// ORIGIN unpinned, so the coverage check is skipped.
+    fn normalize_cookie_domain(raw: &str) -> Result<String, String> {
+        norm_with_host(raw, None)
+    }
+
+    #[test]
+    fn a_domain_that_cannot_hold_the_session_is_refused() {
+        let host = Some("bastion.example.com");
+        assert_eq!(norm_with_host("example.com", host).unwrap(), ".example.com");
+        assert_eq!(
+            norm_with_host("bastion.example.com", host).unwrap(),
+            ".bastion.example.com"
+        );
+
+        // The lockout: a browser drops this cookie, nobody can sign in, and
+        // login_page then expires the admin's last working host-only copy.
+        let err = norm_with_host("other.com", host).unwrap_err();
+        assert!(err.contains("not under"), "{}", err);
+
+        // A label boundary is required — `ends_with` alone would accept this.
+        assert!(norm_with_host("ample.com", host).is_err());
+        // Narrower than bastion's own host cannot hold it either.
+        assert!(norm_with_host("app.bastion.example.com", host).is_err());
+    }
 
     #[test]
     fn cookie_domain_normalizes() {

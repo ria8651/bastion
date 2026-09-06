@@ -91,15 +91,9 @@ pub async fn introspect(
         .flatten();
         if let Some((sid,)) = s {
             service_id = Some(sid);
-            let g: Option<(i64,)> =
-                sqlx::query_as("SELECT user_id FROM grants WHERE user_id = ? AND service_id = ?")
-                    .bind(uid)
-                    .bind(sid)
-                    .fetch_optional(&state.pool)
-                    .await
-                    .ok()
-                    .flatten();
-            granted = g.is_some();
+            granted = crate::grants::is_granted(&state.pool, uid, sid)
+                .await
+                .unwrap_or(false);
         }
     }
 

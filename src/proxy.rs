@@ -41,6 +41,12 @@ use tower_cookies::Cookies;
 use crate::session::{read_session_cookie, validate_session_token};
 use crate::state::{self_origin, AppState};
 
+/// Plaintext only.
+///
+/// TLS terminates at the gateway in front of bastion, and an upstream is the
+/// app itself — normally on loopback, where encrypting the hop buys nothing.
+/// `validate()` refuses `https://` upstreams to match, so this cannot silently
+/// become the reason a request fails.
 pub type ProxyClient = Client<HttpConnector, Body>;
 
 pub fn client() -> ProxyClient {
@@ -92,6 +98,21 @@ fn is_identity_header(name: &HeaderName) -> bool {
     let n = name.as_str();
     n.starts_with("x-bastion-") || matches!(n, "remote-user" | "remote-email" | "remote-groups")
 }
+
+/// Marker set on every proxied request, used to detect a proxy loop.
+///
+/// An upstream pointing back at bastion — directly, or via a DNS alias that
+/// config-time validation can't see through — recurses: `Host` is copied to the
+/// upstream, so the request matches the same service on arrival and is proxied
+/// again. On a public path that needs no session, one request spirals until the
+/// process runs out of file descriptors.
+///
+/// This is checked in `proxy_gate` against the *raw* inbound request, which
+/// works precisely because `is_identity_header` has not run yet: the strip
+/// happens in `forward`, so a client's own copy never reaches an upstream and
+/// bastion's copy is always freshly set. A client that forges the header only
+/// refuses its own request.
+const LOOP_MARKER: &str = "x-bastion-proxied";
 
 /// Reduce a value to printable ASCII.
 ///
@@ -365,6 +386,21 @@ pub async fn proxy_gate(
         }
     };
 
+    // Already been through here once, so the upstream leads back to bastion.
+    // Left unchecked this recurses until the process runs out of descriptors.
+    if req.headers().contains_key(LOOP_MARKER) {
+        tracing::error!(
+            slug = %svc.slug, upstream = %svc.upstream,
+            "proxy loop — upstream resolves back to bastion"
+        );
+        return (
+            StatusCode::LOOP_DETECTED,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "proxy loop: this app's upstream leads back to bastion",
+        )
+            .into_response();
+    }
+
     let path = req.uri().path().to_string();
 
     // Before any routing decision, and for every proxied request rather than
@@ -379,6 +415,23 @@ pub async fn proxy_gate(
     let patterns = parse_public_paths(svc.public_paths.as_deref());
     if is_public_path(&patterns, &path) {
         return forward(&state, &svc, req, None, peer).await;
+    }
+
+    // Everything past this point needs the session cookie to survive the trip
+    // from bastion's hostname to this one, which only a cookie domain arranges.
+    // Without one the browser would be sent to log in, come back with nothing,
+    // and be sent to log in again, forever — and that is the state a service
+    // is in the moment it is first switched to proxy mode. Say so instead.
+    if crate::settings::cookie_domain(&state.pool).await.is_none() {
+        tracing::error!(
+            slug = %svc.slug,
+            "proxy mode with no cookie_domain — sessions cannot reach this host"
+        );
+        return misconfigured(
+            "No session cookie domain is set, so sign-in cannot carry across to \
+             this hostname. An admin needs to set one under Proxy mode in \
+             bastion's service settings.",
+        );
     }
 
     // ── who is this? ──
@@ -417,15 +470,9 @@ pub async fn proxy_gate(
     }
 
     // ── are they allowed in here? ──
-    let granted: Result<Option<(i64,)>, _> =
-        sqlx::query_as("SELECT user_id FROM grants WHERE user_id = ? AND service_id = ?")
-            .bind(user.id)
-            .bind(svc.id)
-            .fetch_optional(&state.pool)
-            .await;
-    match granted {
-        Ok(Some(_)) => {}
-        Ok(None) => {
+    match crate::grants::is_granted(&state.pool, user.id, svc.id).await {
+        Ok(true) => {}
+        Ok(false) => {
             // Only file a request off a real navigation: this runs on every
             // subresource of every page, and one gated page load would
             // otherwise produce a burst of identical rows.
@@ -542,6 +589,7 @@ async fn forward(
         };
         set(h, "x-forwarded-for", &fwd);
 
+        set(h, LOOP_MARKER, "1");
         if let Some(id) = &identity {
             for (name, value) in identity_headers(id) {
                 set(h, name, &value);
@@ -678,11 +726,7 @@ fn is_bastion_host(state: &AppState, host: &str) -> bool {
     if host == "localhost" || host.parse::<std::net::IpAddr>().is_ok() || host.starts_with('[') {
         return true;
     }
-    url::Url::parse(origin)
-        .ok()
-        .and_then(|u| u.host_str().map(|h| h.trim_end_matches('.').to_ascii_lowercase()))
-        .map(|h| h == host)
-        .unwrap_or(true)
+    crate::host::of_url(origin).map(|h| h == host).unwrap_or(true)
 }
 
 /// The public origin of a gated app as **bastion** knows it: `(scheme,
@@ -720,21 +764,8 @@ fn public_origin(state: &AppState, proxy_host: &str, req: &Request) -> (String, 
 
 /// Hostname only, port stripped, for matching against `proxy_host`.
 fn request_host(req: &Request) -> Option<String> {
-    let raw = request_authority(req)?;
-    // Leave IPv6 literals alone; they are not valid proxy_host values anyway.
-    if raw.starts_with('[') {
-        return Some(raw);
-    }
-    // Trailing root dot too: `app.example.com.` is the same name to DNS, and
-    // `normalize_host` strips dots on the way in, so without this the fully
-    // qualified form misses `proxy_host` and falls through to bastion's own UI.
-    Some(
-        raw.split(':')
-            .next()
-            .unwrap_or(&raw)
-            .trim_end_matches('.')
-            .to_string(),
-    )
+    let h = crate::host::bare(&request_authority(req)?);
+    (!h.is_empty()).then_some(h)
 }
 
 fn request_scheme(req: &Request) -> &str {
@@ -754,15 +785,23 @@ fn deny(status: StatusCode, redirect: Option<String>) -> Response {
     }
 }
 
+fn misconfigured(detail: &str) -> Response {
+    status_page(StatusCode::SERVICE_UNAVAILABLE, "not configured", detail)
+}
+
 fn bad_gateway(detail: &str) -> Response {
+    status_page(StatusCode::BAD_GATEWAY, "bad gateway", detail)
+}
+
+fn status_page(status: StatusCode, headline: &str, detail: &str) -> Response {
     (
-        StatusCode::BAD_GATEWAY,
+        status,
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
         format!(
-            "<!doctype html><meta charset=utf-8><title>502</title>\
+            "<!doctype html><meta charset=utf-8><title>{code}</title>\
              <style>body{{font:14px system-ui;padding:48px;color:#444}}</style>\
-             <h1 style=\"font-size:16px\">502 &middot; bad gateway</h1><p>{}</p>",
-            detail
+             <h1 style=\"font-size:16px\">{code} &middot; {headline}</h1><p>{detail}</p>",
+            code = status.as_u16(),
         ),
     )
         .into_response()
@@ -863,6 +902,17 @@ mod tests {
         ] {
             assert!(!has_dot_segment(ok), "{} rejected but is legitimate", ok);
         }
+    }
+
+    #[test]
+    fn the_loop_marker_lives_where_both_halves_can_see_it() {
+        // proxy_gate checks the raw inbound request, so the marker has to be
+        // visible there — but it must also be stripped before reaching an
+        // upstream, or a client's forged copy would ride along and bastion's
+        // own would accumulate. The x-bastion- prefix gives both, because the
+        // strip happens later, in forward().
+        assert!(is_identity_header(&HeaderName::from_static(LOOP_MARKER)));
+        assert!(!is_hop_by_hop(&HeaderName::from_static(LOOP_MARKER)));
     }
 
     #[test]

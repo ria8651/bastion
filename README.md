@@ -80,7 +80,7 @@ Switch a service to **proxy mode** and bastion serves the app's hostname itself:
 
 Setup, in `/admin/services`:
 
-1. **Set a session cookie domain** under *Proxy mode* (e.g. `example.com`). Sign-in happens on bastion's own hostname, so a host-only cookie is never sent to the app and every request looks signed out. Use a domain you control end to end; every host under it receives the token.
+1. **Set a session cookie domain** under *Proxy mode* (e.g. `example.com`). Sign-in happens on bastion's own hostname, so a host-only cookie is never sent to the app. This is required, not advisory — without it a gated host answers 503 rather than bouncing the browser between bastion and the app forever. It must cover bastion's own host, which is checked when you save it. Use a domain you control end to end; every host under it receives the token.
 2. **Pin `ORIGIN`**, since a proxied request's `Host` is the app's hostname, not bastion's.
 3. **Add the service** in proxy mode with its public hostname and upstream (`http://127.0.0.1:8080`), then point that hostname's DNS and TLS at bastion.
 
@@ -120,6 +120,8 @@ src/
   session.rs        token gen, sha256 store, sliding renewal, cookie scoping
   settings.rs       instance-wide key/value config
   proxy.rs          reverse proxy for mode='proxy': gate, header injection, upgrades
+  host.rs           hostname normalisation + cookie-domain containment
+  grants.rs         "is this user allowed into this service"
   oauth.rs          GitHub OAuth (authorize URL, code exchange, /user fetch)
   keys.rs           RS256 keypair gen, JWK persistence
   jwt.rs            identity_hash, issue_service_token, verify_service_token

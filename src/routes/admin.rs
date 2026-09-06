@@ -1445,6 +1445,7 @@ pub struct ServiceUpdateForm {
     pub public_paths: Option<String>,
 }
 
+#[derive(Debug)]
 pub struct ServiceFields {
     pub slug: String,
     pub name: String,
@@ -1454,29 +1455,6 @@ pub struct ServiceFields {
     pub upstream_url: Option<String>,
 }
 
-/// Reduce a hostname field to a bare host: no scheme, path, port or trailing
-/// dot. `proxy_host` is compared for equality against the `Host` a gateway
-/// forwards and against a redirect target's parsed host, so anything stored
-/// with extra syntax simply never matches.
-fn normalize_host(raw: &str) -> Result<String, String> {
-    let mut h = raw.trim().to_ascii_lowercase();
-    if let Some(rest) = h.split("://").nth(1) {
-        h = rest.to_string();
-    }
-    h = h.split('/').next().unwrap_or("").to_string();
-    h = h.split(':').next().unwrap_or("").to_string();
-    let h = h.trim_matches('.').to_string();
-    if h.is_empty() {
-        return Err("public hostname required for proxy mode".into());
-    }
-    if !h
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
-    {
-        return Err("public hostname contains invalid characters".into());
-    }
-    Ok(h)
-}
 
 fn validate(
     slug: &str,
@@ -1508,7 +1486,7 @@ fn validate(
     let mut return_url = return_url.trim().to_string();
     let mut upstream = None;
     let proxy_host = if mode == "proxy" {
-        let host = normalize_host(proxy_host.unwrap_or(""))?;
+        let host = crate::host::validate(proxy_host.unwrap_or(""), "public hostname")?;
 
         // Admin-only, and never settable by a self-registering service: an
         // attacker-chosen upstream would turn bastion into an open proxy onto
@@ -1517,20 +1495,27 @@ fn validate(
         if u.is_empty() {
             return Err("upstream URL required for proxy mode".into());
         }
-        let parsed = match url::Url::parse(&u) {
-            Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => parsed,
-            Ok(_) => return Err("upstream URL must be http or https".into()),
+        // http only, matching the proxy client. TLS terminates at the gateway
+        // in front of bastion, and the upstream is the app itself — normally on
+        // loopback. Accepting https here would mean every request to that
+        // service 502s with nothing to explain why.
+        match url::Url::parse(&u) {
+            Ok(parsed) if parsed.scheme() == "http" => {}
+            Ok(parsed) if parsed.scheme() == "https" => {
+                return Err(
+                    "upstream URL must be http — bastion talks to upstreams in plaintext, \
+                     and TLS belongs at the gateway in front of bastion"
+                        .into(),
+                )
+            }
+            Ok(_) => return Err("upstream URL must be http".into()),
             Err(_) => return Err("upstream URL must be a valid URL".into()),
-        };
+        }
         // Compare hosts, not string suffixes: `ends_with` called
         // http://myapp.example.com a loop against app.example.com, and missed
         // the real one at https://app.example.com:443/ because the port breaks
         // the suffix test.
-        if parsed
-            .host_str()
-            .map(|h| h.trim_end_matches('.').eq_ignore_ascii_case(&host))
-            .unwrap_or(false)
-        {
+        if crate::host::of_url(&u).as_deref() == Some(host.as_str()) {
             return Err("upstream URL points back at the public hostname — that is a loop".into());
         }
         upstream = Some(u);
@@ -2055,6 +2040,11 @@ pub async fn providers_clear(
     Ok(Redirect::to("/admin/providers").into_response())
 }
 
+/// Host from `ORIGIN`, or `None` when it isn't pinned.
+fn bastion_host(state: &AppState) -> Option<String> {
+    crate::host::of_url(state.origin.as_ref()?)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ProxySettingsForm {
     #[serde(rename = "cookieDomain", default)]
@@ -2069,7 +2059,8 @@ pub async fn proxy_settings_save(
     let user = user.map(|Extension(u)| u);
     let admin = require_admin(user.as_ref())?.clone();
     let domain =
-        crate::settings::normalize_cookie_domain(&f.cookie_domain).map_err(AppError::BadRequest)?;
+        crate::settings::normalize_cookie_domain(&f.cookie_domain, bastion_host(&state).as_deref())
+            .map_err(AppError::BadRequest)?;
     crate::settings::set(&state.pool, crate::settings::COOKIE_DOMAIN, &domain)
         .await
         .map_err(AppError::Other)?;
@@ -2114,6 +2105,13 @@ mod tests {
         assert!(proxy("app.example.com", "ftp://host/x").is_err());
         assert!(proxy("app.example.com", "not a url").is_err());
         assert!(validate("demo", "", "", Some("proxy"), Some(""), Some("http://x:1")).is_err());
+
+        // The proxy client is plaintext-only, so an https upstream would save
+        // cleanly and then 502 on every request. Refuse it here, where the
+        // message can say why, rather than there, where nothing can.
+        let err = proxy("app.example.com", "https://127.0.0.1:8080").unwrap_err();
+        assert!(err.contains("must be http"), "{}", err);
+        assert!(err.contains("gateway"), "{}", err);
     }
 
     #[test]

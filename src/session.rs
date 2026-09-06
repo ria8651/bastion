@@ -202,13 +202,30 @@ pub fn clear_session_cookie(cookies: &Cookies, domain: Option<&str>) {
 /// original and its delta sets by cookie name alone, so a jar carries at most
 /// one `bastion_session` removal and the domain-scoped one wins.
 ///
-/// It matters when `cookie_domain` is turned on with sessions already in the
-/// wild. A browser then holds two `bastion_session` cookies and sends both;
-/// RFC 6265 orders them by path length then creation time, so the older
-/// host-only one comes first and is the one parsed, shadowing every new
-/// domain-scoped session indefinitely. Expiring by name with no Domain
-/// attribute removes only the host-only cookie — cookie deletion matches on
-/// (name, domain, path), so the domain-scoped one is untouched.
+/// Housekeeping, not a fix. Turning on `cookie_domain` with sessions already in
+/// the wild leaves a browser holding two `bastion_session` cookies, and it sends
+/// both — but `CookieJar::add_original` is a `HashSet::replace` keyed by name,
+/// so the *last* one parsed wins, and RFC 6265 orders equal-path cookies oldest
+/// first. The stale host-only copy is therefore sent first and loses, which is
+/// the outcome we want anyway. Clearing it just stops a dead cookie riding
+/// along on every request.
+///
+/// Expiring by name with no `Domain` removes only the host-only cookie —
+/// deletion matches on (name, domain, path) — so the domain-scoped one it is
+/// paired with in `login_page` is untouched.
+/// Clear the session cookie in every scope it might exist in.
+///
+/// Two mechanisms are needed because the jar can only carry one removal per
+/// cookie name, so it takes the domain-scoped one and the host-only copy has to
+/// go out as a raw header. Callers kept getting one half of that and not the
+/// other; this is the whole ritual.
+pub fn clear_session_everywhere(cookies: &Cookies, res: &mut Response, domain: Option<&str>) {
+    clear_session_cookie(cookies, domain);
+    if domain.is_some() {
+        expire_host_only_session(res);
+    }
+}
+
 pub fn expire_host_only_session(res: &mut Response) {
     if let Ok(v) = HeaderValue::from_str(&format!(
         "{}=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
