@@ -28,7 +28,17 @@ The JWT `sub` is derived from a frozen pair `(users.sub_anchor_provider, users.s
 
 ## Templating
 
-Pages are plain async handlers returning `maud::Markup`. Layouts compose via function calls — `templates::layout(title, user, body)` and `templates::admin_layout(title, tab, user, body)`. No `.html` files. The stylesheet at `static/style.css` is inlined into pages via `include_str!` in `templates.rs`.
+Pages are plain async handlers returning `maud::Markup`. Layouts compose via function calls — `templates::layout(title, body)` for everything outside admin. No `.html` files. The stylesheet at `static/style.css` is inlined into pages via `include_str!` in `templates.rs`.
+
+### Admin UI
+
+`src/routes/admin/` is one module per section (`overview`, `users`, `requests`, `services`, `providers`, `settings`, `audit`), plus `ui.rs`, which holds the shell and the components every page is built from: `header`, `section`, `badge`/`status_badge`, `notice`, `empty`, `field`, `Post` (one-button forms), `switch`. Pages compose those instead of using inline `style=` attributes. If a page needs something they don't cover, add a component or a class in `static/admin.css`. Every handler starts with `ctx(&state, &headers, user)`, which gates on admin and loads the nav counts.
+
+- **`admin.css` is inlined inside `<body>`, not `<head>`,** because hx-boost swaps only the body. A head stylesheet wouldn't arrive when you click from the dashboard into admin.
+- **Responsive by default.** There's a sidebar above 900px and a top bar plus drawer below it. Lists are `.row`s, not tables, so they reflow at any width; `.row.decide` puts a pair of decision buttons full-width underneath on phones.
+- **Nav groups (Access / Apps / System) are where roadmap pages slot in**: groups and roles under Access, routes under Apps, certificates under System.
+- **In-place toggles use `Post::stay()` / `switch()`,** which set `hx-swap="innerHTML show:none"` so the page doesn't jump to the top. Handlers that several pages post to take a `next` param, validated by `ui::next_or` (local `/admin` paths only).
+- **No dead controls.** Don't add a filter, sort or export control that isn't wired up.
 
 ## htmx
 

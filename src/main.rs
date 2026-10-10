@@ -88,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/account/link", post(routes::account::link_post))
         .route("/account/unlink", post(routes::account::unlink_post))
         // admin
-        .route("/admin", get(routes::admin::index_redirect))
+        .route("/admin", get(routes::admin::overview_page))
         .route("/admin/audit", get(routes::admin::audit_page))
         .route("/admin/requests", get(routes::admin::requests_page))
         .route(
@@ -113,6 +113,8 @@ async fn main() -> anyhow::Result<()> {
             post(routes::admin::revoke_sessions),
         )
         .route("/admin/services", get(routes::admin::services_page))
+        .route("/admin/services/new", get(routes::admin::service_new_page))
+        .route("/admin/services/:id", get(routes::admin::service_detail))
         .route("/admin/services/add", post(routes::admin::add_service))
         .route(
             "/admin/services/update",
@@ -123,10 +125,6 @@ async fn main() -> anyhow::Result<()> {
             post(routes::admin::remove_service),
         )
         .route(
-            "/admin/services/proxy-settings",
-            post(routes::admin::proxy_settings_save),
-        )
-        .route(
             "/admin/services/approve-registration",
             post(routes::admin::approve_registration),
         )
@@ -135,6 +133,11 @@ async fn main() -> anyhow::Result<()> {
             post(routes::admin::deny_registration),
         )
         .route("/admin/providers", get(routes::admin::providers_page))
+        .route("/admin/settings", get(routes::admin::settings_page))
+        .route(
+            "/admin/settings/cookie-domain",
+            post(routes::admin::cookie_domain_save),
+        )
         .route(
             "/admin/providers/save/:provider",
             post(routes::admin::providers_save),

@@ -4,7 +4,7 @@ use crate::models::UserCtx;
 
 const STYLE: &str = include_str!("../static/style.css");
 pub const LOGO_SVG: &str = include_str!("../static/logo-icon.svg");
-const VERSION_TAG: &str = "v0.5";
+pub const VERSION_TAG: &str = "v0.5";
 
 pub fn layout(title: &str, body: Markup) -> Markup {
     html! {
@@ -132,10 +132,6 @@ pub fn pill(kind: &str, label: &str) -> Markup {
     html! { span class=(class) { (label) } }
 }
 
-pub fn status_pill(status: &str) -> Markup {
-    pill(status, status)
-}
-
 pub fn initials(name: &str) -> String {
     let s: String = name.chars().take(2).collect();
     s.to_lowercase()
@@ -190,95 +186,5 @@ pub fn provider_display_name(provider: &str) -> &'static str {
         "github" => "GitHub",
         "google" => "Google",
         _ => "unknown",
-    }
-}
-
-/// Sidebar tab identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AdminTab {
-    Users,
-    Requests,
-    Services,
-    Providers,
-    Audit,
-}
-
-pub struct AdminCounts {
-    pub users: Option<i64>,
-    pub requests: Option<i64>,
-    pub services: Option<i64>,
-}
-
-pub fn admin_shell(
-    active: AdminTab,
-    user: &UserCtx,
-    host: &str,
-    counts: AdminCounts,
-    body: Markup,
-) -> Markup {
-    let title = match active {
-        AdminTab::Users => "Users",
-        AdminTab::Requests => "Access requests",
-        AdminTab::Services => "Services",
-        AdminTab::Providers => "Identity providers",
-        AdminTab::Audit => "Audit log",
-    };
-    let shell = html! {
-        div.admin-shell {
-            aside.admin-sidebar {
-                a.admin-brand href="/" {
-                    (logo(24))
-                    div {
-                        div.name { "bastion" }
-                        div.host { (host) }
-                    }
-                }
-                nav.admin-nav {
-                    (admin_nav_item("Users", "/admin/users", active == AdminTab::Users, counts.users))
-                    (admin_nav_item("Access requests", "/admin/requests", active == AdminTab::Requests, counts.requests))
-                    (admin_nav_item("Services", "/admin/services", active == AdminTab::Services, counts.services))
-                    (admin_nav_item("Identity providers", "/admin/providers", active == AdminTab::Providers, None))
-                    (admin_nav_item("Audit log", "/admin/audit", active == AdminTab::Audit, None))
-                }
-                div.admin-user {
-                    (avatar(user, ""))
-                    div.info {
-                        div.uname { (user.username) }
-                        div.role { @if user.is_admin { "admin" } @else { "user" } }
-                    }
-                    form method="post" action="/auth/logout" hx-boost="false" style="margin:0" {
-                        button.btn.text.signout type="submit" title="sign out" { "sign out" }
-                    }
-                }
-            }
-            main.admin-main { (body) }
-        }
-    };
-    layout(title, shell)
-}
-
-fn admin_nav_item(label: &str, href: &str, active: bool, count: Option<i64>) -> Markup {
-    let class = if active { "admin-nav-item active" } else { "admin-nav-item" };
-    html! {
-        a class=(class) href=(href) {
-            span { (label) }
-            @if let Some(n) = count {
-                span.count { (n) }
-            }
-        }
-    }
-}
-
-pub fn admin_header(title: &str, meta: Option<&str>, action: Option<Markup>) -> Markup {
-    html! {
-        div.admin-header {
-            div.titlewrap {
-                h1 { (title) }
-                @if let Some(m) = meta {
-                    span.meta { (m) }
-                }
-            }
-            @if let Some(a) = action { (a) }
-        }
     }
 }
