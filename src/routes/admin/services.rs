@@ -26,14 +26,15 @@ pub async fn services_page(
     let ctx = ctx(&state, &headers, user).await?;
 
     #[allow(clippy::type_complexity)]
-    let rows: Vec<(i64, String, String, String, String, Option<String>, Option<String>, Option<i64>, i64, i64, String)> =
+    let rows: Vec<(i64, String, String, String, Option<i64>, i64, i64, String, Option<String>)> =
         sqlx::query_as(
-            "SELECT s.id, s.slug, s.name, s.status, s.mode, s.proxy_host, s.upstream_url,
-                    s.registered_at,
+            "SELECT s.id, s.slug, s.name, s.status, s.registered_at,
                     (SELECT COUNT(*) FROM grants g WHERE g.service_id = s.id),
                     (SELECT COUNT(*) FROM permissions p
                       WHERE p.service_id = s.id AND p.removed_at IS NULL),
-                    s.return_url
+                    s.return_url,
+                    (SELECT group_concat(h.host, ', ') FROM route_hosts h
+                       JOIN routes r ON r.id = h.route_id WHERE r.service_id = s.id)
              FROM services s
              WHERE s.deleted_at IS NULL
              ORDER BY s.slug",
@@ -58,7 +59,7 @@ pub async fn services_page(
             (section("Awaiting review", Some(pending.len()), None, html! {
                 p.sec-desc { "These services registered themselves via the API. Nobody can sign in to them until you approve." }
                 div.list {
-                    @for (id, slug, name, _, _, _, _, registered, ..) in &pending {
+                    @for (id, slug, name, _, registered, ..) in &pending {
                         a.row href=(format!("/admin/services/{}", id)) {
                             span.lead { (tile(slug, "")) }
                             div.row-body {
@@ -81,7 +82,7 @@ pub async fn services_page(
                     "Services register themselves by POSTing to /api/services/register, or add one by hand."))
             } @else {
                 div.list {
-                    @for (id, slug, name, _, mode, phost, upstream, _, users, perms, return_url) in &approved {
+                    @for (id, slug, name, _, _, users, perms, return_url, gated_hosts) in &approved {
                         a.row href=(format!("/admin/services/{}", id)) {
                             span.lead { (tile(slug, "")) }
                             div.row-body {
@@ -91,15 +92,18 @@ pub async fn services_page(
                                         @if name != slug { span.mute { " · " (name) } }
                                     }
                                     div.s {
-                                        @if mode == "proxy" {
-                                            (phost.as_deref().unwrap_or("—")) " → " (upstream.as_deref().unwrap_or("no upstream"))
-                                        } @else {
+                                        @if let Some(h) = gated_hosts {
+                                            (h)
+                                        } @else if !return_url.is_empty() {
                                             (return_url)
+                                        } @else {
+                                            "no way in yet"
                                         }
                                     }
                                 }
                                 div.meta {
-                                    (badge(Tone::Quiet, mode))
+                                    @if gated_hosts.is_some() { (badge(Tone::Quiet, "gated")) }
+                                    @if !return_url.is_empty() { (badge(Tone::Quiet, "token")) }
                                     span { (users) " " (if *users == 1 { "user" } else { "users" }) }
                                     @if *perms > 0 { span { (perms) " perms" } }
                                 }
@@ -139,20 +143,12 @@ struct FormValues<'a> {
     id: Option<i64>,
     slug: &'a str,
     name: &'a str,
-    mode: &'a str,
     return_url: &'a str,
-    proxy_host: &'a str,
-    upstream_url: &'a str,
-    public_paths: &'a str,
 }
 
-/// One form for create and edit. Fields for the other mode are hidden by CSS
-/// keyed on `data-mode`, which the radios update; without JS everything shows
-/// and the server ignores what the mode doesn't use.
 fn service_form(action: &str, submit: &str, v: &FormValues) -> Markup {
-    let mode = if v.mode == "proxy" { "proxy" } else { "redirect" };
     html! {
-        form.form method="post" action=(action) data-mode=(mode) {
+        form.form method="post" action=(action) {
             @if let Some(id) = v.id { input type="hidden" name="id" value=(id); }
             div.grid-2 {
                 (field("Slug", Some("Lowercase letters, digits and dashes. Becomes the JWT audience."),
@@ -161,45 +157,10 @@ fn service_form(action: &str, submit: &str, v: &FormValues) -> Markup {
                 (field("Name", Some("Shown to users. Defaults to the slug."),
                     html! { input.input name="name" value=(v.name); }))
             }
-            div.fld {
-                span.l { "Mode" }
-                div.choice role="radiogroup" {
-                    label {
-                        input type="radio" name="mode" value="redirect" checked[mode == "redirect"]
-                            onchange="this.form.dataset.mode=this.value";
-                        div {
-                            div.t { "Redirect" }
-                            div.d { "The app sends users to bastion and verifies the JWT it gets back." }
-                        }
-                    }
-                    label {
-                        input type="radio" name="mode" value="proxy" checked[mode == "proxy"]
-                            onchange="this.form.dataset.mode=this.value";
-                        div {
-                            div.t { "Proxy" }
-                            div.d { "bastion serves the app's hostname and forwards with identity headers. The app needs no changes." }
-                        }
-                    }
-                }
-            }
-            div data-for="redirect" {
-                (field("Return URL", Some("Where users land after sign-in, with ?bastion_token= appended."),
-                    html! { input.input.mono name="returnUrl" value=(v.return_url) type="url"
-                        placeholder="https://app.example.com/auth/bastion" autocapitalize="off"; }))
-            }
-            div.grid-2 data-for="proxy" {
-                (field("Public hostname", Some("Point its DNS and TLS at bastion."),
-                    html! { input.input.mono name="proxyHost" value=(v.proxy_host)
-                        placeholder="app.example.com" autocapitalize="off" spellcheck="false"; }))
-                (field("Upstream", Some("Where the app actually listens. Plain http."),
-                    html! { input.input.mono name="upstreamUrl" value=(v.upstream_url)
-                        placeholder="http://127.0.0.1:8080" autocapitalize="off" spellcheck="false"; }))
-            }
-            div data-for="proxy" {
-                (field("Public paths", Some("One glob per line. Forwarded without a session — health checks, webhooks."),
-                    html! { textarea.input name="publicPaths" rows="3"
-                        placeholder="/health\n/api/webhooks/*" { (v.public_paths) } }))
-            }
+            (field("Return URL",
+                Some("Only for an app that verifies bastion's token itself: users land here after sign-in, with ?bastion_token= appended. Leave empty for an app gated by a route."),
+                html! { input.input.mono name="returnUrl" value=(v.return_url) type="url"
+                    placeholder="https://app.example.com/auth/bastion" autocapitalize="off"; }))
             div.form-actions {
                 button.btn.primary type="submit" { (submit) }
             }
@@ -219,13 +180,13 @@ pub async fn service_new_page(
         (back("/admin/services", "Services"))
         (header(None, "New service", None, None))
         p.sec-desc {
-            "Most services register themselves by POSTing to "
+            "A service is who may get in. Apps that verify bastion's token register themselves by POSTing to "
             span.code { "/api/services/register" }
-            " on boot and appear for review. Add one here when it can't — including any proxied app, "
-            "since only an admin can set an upstream."
+            " and appear for review. For an app that knows nothing about bastion, create a service here, "
+            "then gate a route with it."
         }
         div.panel {
-            (service_form("/admin/services/add", "Create service", &FormValues { mode: "redirect", ..Default::default() }))
+            (service_form("/admin/services/add", "Create service", &FormValues::default()))
         }
     };
     Ok(ctx.page(Nav::Services, "New service", body).into_response())
@@ -242,16 +203,15 @@ pub async fn service_detail(
     let ctx = ctx(&state, &headers, user).await?;
 
     #[allow(clippy::type_complexity)]
-    let row: Option<(String, String, String, String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<i64>, i64)> =
+    let row: Option<(String, String, String, String, Option<String>, Option<i64>, i64)> =
         sqlx::query_as(
-            "SELECT slug, name, return_url, status, mode, proxy_host, upstream_url, public_paths,
-                    public_jwk, registered_at, created_at
+            "SELECT slug, name, return_url, status, public_jwk, registered_at, created_at
              FROM services WHERE id = ? AND deleted_at IS NULL",
         )
         .bind(id)
         .fetch_optional(&state.pool)
         .await?;
-    let Some((slug, name, return_url, status, mode, phost, upstream, ppaths, jwk, registered, created)) = row
+    let Some((slug, name, return_url, status, jwk, registered, created)) = row
     else {
         return Err(AppError::NotFound);
     };
@@ -265,7 +225,7 @@ pub async fn service_detail(
     .await?;
     let active_perms = perms.iter().filter(|p| p.2.is_none()).count();
     let id_s = id.to_string();
-    let is_proxy = mode == "proxy";
+    let uses_token = !return_url.is_empty();
 
     let perms_list = html! {
         @if perms.is_empty() {
@@ -347,24 +307,33 @@ pub async fn service_detail(
             .bind(id)
             .fetch_all(&state.pool)
             .await?;
+            let routes: Vec<(i64, String, String, bool, String)> = sqlx::query_as(
+                "SELECT r.id, r.name, r.upstream_url, r.enabled,
+                        COALESCE((SELECT group_concat(host, ', ') FROM
+                                   (SELECT host FROM route_hosts WHERE route_id = r.id ORDER BY host)), '')
+                 FROM routes r WHERE r.service_id = ? ORDER BY r.name",
+            )
+            .bind(id)
+            .fetch_all(&state.pool)
+            .await?;
             let health = ProxyHealth::load(&state).await?;
-            let target = if is_proxy { phost.clone().unwrap_or_default() } else { return_url.clone() };
+            let can_open = uses_token || routes.iter().any(|r| r.3);
             html! {
                 (back("/admin/services", "Services"))
                 (header(
                     Some(tile(&slug, "lg")),
                     &slug,
                     Some(html! {
-                        (badge(Tone::Quiet, &mode))
+                        @if !routes.is_empty() { (badge(Tone::Quiet, "gated")) }
+                        @if uses_token { (badge(Tone::Quiet, "token")) }
                         @if name != slug { span { (name) } }
                         span { "created " (fmt_time(created)) }
                     }),
-                    Some(html! {
-                        a.btn href=(format!("/launch/{}", slug)) hx-boost="false" target="_blank" rel="noopener"
-                            title=(target) { "Open ↗" }
+                    can_open.then(|| html! {
+                        a.btn href=(format!("/launch/{}", slug)) hx-boost="false" target="_blank" rel="noopener" { "Open ↗" }
                     }),
                 ))
-                @if is_proxy { div.notices { (health.notices()) } }
+                @if !routes.is_empty() { div.notices { (health.notices()) } }
 
                 (section("Configuration", None, None, html! {
                     div.panel {
@@ -372,12 +341,34 @@ pub async fn service_detail(
                             id: Some(id),
                             slug: &slug,
                             name: &name,
-                            mode: &mode,
                             return_url: &return_url,
-                            proxy_host: phost.as_deref().unwrap_or(""),
-                            upstream_url: upstream.as_deref().unwrap_or(""),
-                            public_paths: ppaths.as_deref().unwrap_or(""),
                         }))
+                    }
+                }))
+
+                (section("Reached via", Some(routes.len()),
+                    Some(html! { a.btn.sm href=(format!("/admin/routes/new?service={}", id)) { "Add a route" } }),
+                    html! {
+                    p.sec-desc {
+                        "Routes gated by this service: only people with access get through, and the app "
+                        "receives their identity as headers."
+                    }
+                    @if routes.is_empty() {
+                        (empty("No routes are gated by this service.",
+                            if uses_token { "It's reached through its return URL instead." } else { "Add one to put an app behind it." }))
+                    } @else {
+                        div.list {
+                            @for (rid, rname, upstream, enabled, hosts) in &routes {
+                                a.row href=(format!("/admin/routes/{}", rid)) {
+                                    span.lead { (tile(rname, "")) }
+                                    div.row-body {
+                                        div.main { div.t { (rname) } div.s { (hosts) " → " (upstream) } }
+                                        div.meta { @if !enabled { (status_badge("disabled")) } }
+                                    }
+                                    span.chev { "›" }
+                                }
+                            }
+                        }
                     }
                 }))
 
@@ -403,13 +394,15 @@ pub async fn service_detail(
                     }
                 }))
 
-                // A proxied app can't register a catalog and is sent none, so an
-                // empty section there would only suggest something it can't use.
-                @if !(is_proxy && perms.is_empty()) {
+                // Permissions travel in the JWT only. An app reached solely
+                // through a gated route can't register a catalog and is sent
+                // none, so an empty section there would suggest something it
+                // can't use.
+                @if uses_token || !perms.is_empty() {
                     (section("Permissions", Some(active_perms), None, html! {
                         p.sec-desc {
-                            @if is_proxy {
-                                "Proxy mode doesn't send permissions — the grant is the whole decision. "
+                            @if !uses_token {
+                                "Gated routes don't send permissions — the grant is the whole decision. "
                             }
                             "The catalog belongs to the service, which declares it when it registers. Toggle them per user on each user's page."
                         }
@@ -424,7 +417,11 @@ pub async fn service_detail(
                                 div { "Remove this service" }
                                 div.hint { "Everyone loses access immediately. Its slug becomes free to register again." }
                             }
-                            (remove("Remove service", "Remove this service? Everyone with access loses it immediately."))
+                            (remove("Remove service", if routes.is_empty() {
+                                "Remove this service? Everyone with access loses it immediately."
+                            } else {
+                                "Remove this service? Everyone with access loses it immediately, and the routes it gates close until they're given another service."
+                            }))
                         }
                     }
                 }))
@@ -459,14 +456,6 @@ pub struct ServiceForm {
     pub name: String,
     #[serde(rename = "returnUrl", default)]
     pub return_url: String,
-    #[serde(default)]
-    pub mode: Option<String>,
-    #[serde(rename = "proxyHost", default)]
-    pub proxy_host: Option<String>,
-    #[serde(rename = "upstreamUrl", default)]
-    pub upstream_url: Option<String>,
-    #[serde(rename = "publicPaths", default)]
-    pub public_paths: Option<String>,
 }
 
 #[derive(Debug)]
@@ -474,41 +463,9 @@ pub struct ServiceFields {
     pub slug: String,
     pub name: String,
     pub return_url: String,
-    pub mode: String,
-    pub proxy_host: Option<String>,
-    pub upstream_url: Option<String>,
 }
 
-impl ServiceForm {
-    fn validate(&self) -> Result<ServiceFields, String> {
-        validate(
-            &self.slug,
-            &self.name,
-            &self.return_url,
-            self.mode.as_deref(),
-            self.proxy_host.as_deref(),
-            self.upstream_url.as_deref(),
-        )
-    }
-
-    /// Public paths only mean something in proxy mode; drop them otherwise so
-    /// a service flipped back to redirect doesn't carry stale ones.
-    fn public_paths(&self, mode: &str) -> Option<&str> {
-        self.public_paths
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty() && mode == "proxy")
-    }
-}
-
-fn validate(
-    slug: &str,
-    name: &str,
-    return_url: &str,
-    mode: Option<&str>,
-    proxy_host: Option<&str>,
-    upstream_url: Option<&str>,
-) -> Result<ServiceFields, String> {
+fn validate(slug: &str, name: &str, return_url: &str) -> Result<ServiceFields, String> {
     let slug = slug.trim().to_string();
     let name = {
         let n = name.trim();
@@ -520,69 +477,12 @@ fn validate(
     if !slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
         return Err("slug must be lowercase alphanumeric + dashes".into());
     }
-
-    let mode = match mode.map(str::trim).unwrap_or("redirect") {
-        "" | "redirect" => "redirect",
-        "proxy" => "proxy",
-        _ => return Err("mode must be redirect or proxy".into()),
-    }
-    .to_string();
-
-    let mut return_url = return_url.trim().to_string();
-    let mut upstream = None;
-    let proxy_host = if mode == "proxy" {
-        let host = crate::host::validate(proxy_host.unwrap_or(""), "public hostname")?;
-
-        // Admin-only, and never settable by a self-registering service: an
-        // attacker-chosen upstream would turn bastion into an open proxy onto
-        // whatever the box can reach.
-        let u = upstream_url.unwrap_or("").trim().to_string();
-        if u.is_empty() {
-            return Err("upstream URL required for proxy mode".into());
-        }
-        // http only, matching the proxy client. TLS terminates at the gateway
-        // in front of bastion, and the upstream is the app itself — normally on
-        // loopback. Accepting https here would mean every request to that
-        // service 502s with nothing to explain why.
-        match url::Url::parse(&u) {
-            Ok(parsed) if parsed.scheme() == "http" => {}
-            Ok(parsed) if parsed.scheme() == "https" => {
-                return Err(
-                    "upstream URL must be http — bastion talks to upstreams in plaintext, \
-                     and TLS belongs at the gateway in front of bastion"
-                        .into(),
-                )
-            }
-            Ok(_) => return Err("upstream URL must be http".into()),
-            Err(_) => return Err("upstream URL must be a valid URL".into()),
-        }
-        // Compare hosts, not string suffixes: `ends_with` called
-        // http://myapp.example.com a loop against app.example.com, and missed
-        // the real one at https://app.example.com:443/ because the port breaks
-        // the suffix test.
-        if crate::host::of_url(&u).as_deref() == Some(host.as_str()) {
-            return Err("upstream URL points back at the public hostname — that is a loop".into());
-        }
-        upstream = Some(u);
-        // A proxied app is reached at its own hostname, so that *is* the place
-        // to land after login. Keeping return_url populated also means
-        // /launch/<slug> and the pending page's "try again" keep working
-        // unchanged for both modes.
-        if return_url.is_empty() {
-            return_url = format!("https://{}/", host);
-        }
-        Some(host)
-    } else {
-        None
-    };
-
-    if return_url.is_empty() {
-        return Err("return url required for redirect mode".into());
-    }
-    if url::Url::parse(&return_url).is_err() {
+    // Optional: empty means the service is only reached through gated routes.
+    let return_url = return_url.trim().to_string();
+    if !return_url.is_empty() && url::Url::parse(&return_url).is_err() {
         return Err("return url must be a valid URL".into());
     }
-    Ok(ServiceFields { slug, name, return_url, mode, proxy_host, upstream_url: upstream })
+    Ok(ServiceFields { slug, name, return_url })
 }
 
 pub async fn add_service(
@@ -591,19 +491,15 @@ pub async fn add_service(
     Form(f): Form<ServiceForm>,
 ) -> AppResult<Response> {
     let admin = admin(user)?;
-    let v = f.validate().map_err(AppError::BadRequest)?;
+    let v = validate(&f.slug, &f.name, &f.return_url).map_err(AppError::BadRequest)?;
     let inserted: Option<(i64,)> = sqlx::query_as(
-        "INSERT INTO services (slug, name, return_url, mode, proxy_host, upstream_url, public_paths)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+        "INSERT INTO services (slug, name, return_url)
+         VALUES (?, ?, ?)
          ON CONFLICT(slug) WHERE deleted_at IS NULL DO NOTHING RETURNING id",
     )
     .bind(&v.slug)
     .bind(&v.name)
     .bind(&v.return_url)
-    .bind(&v.mode)
-    .bind(&v.proxy_host)
-    .bind(&v.upstream_url)
-    .bind(f.public_paths(&v.mode))
     .fetch_optional(&state.pool)
     .await?;
     let Some((sid,)) = inserted else {
@@ -638,20 +534,11 @@ pub async fn update_service(
 ) -> AppResult<Response> {
     let admin = admin(user)?;
     let id = f.id.ok_or_else(|| AppError::BadRequest("missing service id".into()))?;
-    let v = f.validate().map_err(AppError::BadRequest)?;
-    sqlx::query(
-        "UPDATE services
-         SET slug = ?, name = ?, return_url = ?, mode = ?,
-             proxy_host = ?, upstream_url = ?, public_paths = ?
-         WHERE id = ?",
-    )
+    let v = validate(&f.slug, &f.name, &f.return_url).map_err(AppError::BadRequest)?;
+    sqlx::query("UPDATE services SET slug = ?, name = ?, return_url = ? WHERE id = ?")
     .bind(&v.slug)
     .bind(&v.name)
     .bind(&v.return_url)
-    .bind(&v.mode)
-    .bind(&v.proxy_host)
-    .bind(&v.upstream_url)
-    .bind(f.public_paths(&v.mode))
     .bind(id)
     .execute(&state.pool)
     .await?;
@@ -781,65 +668,15 @@ pub async fn deny_registration(
 mod tests {
     use super::validate;
 
-    fn proxy(host: &str, upstream: &str) -> Result<super::ServiceFields, String> {
-        validate("demo", "Demo", "", Some("proxy"), Some(host), Some(upstream))
-    }
-
     #[test]
-    fn upstream_loop_check_compares_hosts_not_suffixes() {
-        // The suffix test this replaced got both directions wrong.
-        // False positive: a different host that merely ends with the same text.
-        assert!(proxy("app.example.com", "http://myapp.example.com").is_ok());
-        // False negative: the real loop, missed because the port broke the
-        // suffix match.
-        assert!(proxy("app.example.com", "https://app.example.com:443/").is_err());
-
-        assert!(proxy("app.example.com", "http://app.example.com").is_err());
-        assert!(proxy("app.example.com", "http://app.example.com./x").is_err());
-        assert!(proxy("app.example.com", "http://APP.example.com").is_err());
-        assert!(proxy("app.example.com", "http://127.0.0.1:8080").is_ok());
-    }
-
-    #[test]
-    fn proxy_mode_requires_a_usable_upstream() {
-        assert!(proxy("app.example.com", "").is_err());
-        assert!(proxy("app.example.com", "ftp://host/x").is_err());
-        assert!(proxy("app.example.com", "not a url").is_err());
-        assert!(validate("demo", "", "", Some("proxy"), Some(""), Some("http://x:1")).is_err());
-
-        // The proxy client is plaintext-only, so an https upstream would save
-        // cleanly and then 502 on every request. Refuse it here, where the
-        // message can say why, rather than there, where nothing can.
-        let err = proxy("app.example.com", "https://127.0.0.1:8080").unwrap_err();
-        assert!(err.contains("must be http"), "{}", err);
-        assert!(err.contains("gateway"), "{}", err);
-    }
-
-    #[test]
-    fn proxy_fields_are_cleared_in_redirect_mode() {
-        // Otherwise a service flipped back to redirect keeps a live proxy_host,
-        // and its unique index keeps that hostname claimed.
-        let v = validate(
-            "demo",
-            "Demo",
-            "https://demo.example.com/cb",
-            Some("redirect"),
-            Some("app.example.com"),
-            Some("http://127.0.0.1:8080"),
-        )
-        .unwrap();
-        assert_eq!(v.mode, "redirect");
-        assert!(v.proxy_host.is_none());
-        assert!(v.upstream_url.is_none());
-        assert_eq!(v.return_url, "https://demo.example.com/cb");
-    }
-
-    #[test]
-    fn proxy_mode_defaults_return_url_to_the_public_host() {
-        // /launch/<slug> and the pending page's "try again" both go through
-        // return_url, so it has to be populated in either mode.
-        let v = proxy("app.example.com", "http://127.0.0.1:8080").unwrap();
-        assert_eq!(v.return_url, "https://app.example.com/");
-        assert_eq!(v.proxy_host.as_deref(), Some("app.example.com"));
+    fn return_url_is_optional_but_must_parse() {
+        // A service gated only by routes has nowhere to send a token.
+        let v = validate("demo", "", "").unwrap();
+        assert_eq!(v.return_url, "");
+        assert_eq!(v.name, "demo");
+        assert!(validate("demo", "", "https://demo.example.com/cb").is_ok());
+        assert!(validate("demo", "", "not a url").is_err());
+        assert!(validate("Demo", "", "").is_err());
+        assert!(validate("", "", "").is_err());
     }
 }

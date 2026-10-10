@@ -29,6 +29,7 @@ ENV PORT=5180
 COPY --from=builder /bastion /usr/local/bin/bastion
 
 RUN mkdir -p /data
-EXPOSE 5180
+# 80 and 443 only matter in edge mode (TLS_CERT + TLS_KEY).
+EXPOSE 5180 80 443
 
 CMD ["/usr/local/bin/bastion"]

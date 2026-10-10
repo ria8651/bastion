@@ -29,7 +29,7 @@ use crate::templates::{landing_page, provider_icon};
 pub struct LoginQuery {
     pub service: Option<String>,
     pub claim_admin: Option<String>,
-    /// Set by proxy mode: the gated URL the user was originally after.
+    /// Set by a gated route: the URL the user was originally after.
     pub redirect: Option<String>,
 }
 
@@ -585,28 +585,28 @@ pub async fn callback(
 
     // Active user — if a service redirect, mint a token from the frozen sub anchor.
     if let Some(svc_slug) = stored.service.as_deref() {
-        let svc: Option<(i64, String, String, String)> = sqlx::query_as(
-            "SELECT id, slug, return_url, mode FROM services
+        let svc: Option<(i64, String, String)> = sqlx::query_as(
+            "SELECT id, slug, return_url FROM services
              WHERE slug = ? AND deleted_at IS NULL AND status = 'approved'",
         )
         .bind(svc_slug)
         .fetch_optional(&state.pool)
         .await?;
-        if let Some((svc_id, slug, return_url, mode)) = svc {
+        if let Some((svc_id, slug, return_url)) = svc {
             if crate::grants::is_granted(&state.pool, user_id, svc_id).await? {
-                // Proxied apps get no token: bastion checks the session it
-                // just created on the very next request to the gated host.
-                if mode == "proxy" {
-                    let dest = match stored.redirect.as_deref() {
-                        Some(r) => {
-                            crate::proxy::validate_redirect(&state.pool, r, Some(&slug))
-                                .await
-                                .unwrap_or(return_url)
-                        }
-                        None => return_url,
-                    };
-                    return Ok(Redirect::to(&dest).into_response());
+                // Back to the gated page they were after, with no token:
+                // bastion checks the session it just created on the very next
+                // request to that host.
+                if let Some(r) = stored.redirect.as_deref() {
+                    if let Some(dest) = crate::proxy::validate_redirect(&state.pool, r, Some(&slug)).await {
+                        return Ok(Redirect::to(&dest).into_response());
+                    }
                 }
+                let return_url = match entry(&state, svc_id, return_url).await? {
+                    Some(Entry::Token(u)) => u,
+                    Some(Entry::Gated(u)) => return Ok(Redirect::to(&u).into_response()),
+                    None => return Ok(Redirect::to("/").into_response()),
+                };
                 let u: (String, String, String) = sqlx::query_as(
                     "SELECT username, sub_anchor_provider, sub_anchor_provider_id
                      FROM users WHERE id = ?",
@@ -780,14 +780,14 @@ pub async fn launch(
         return Ok(Redirect::to(&path).into_response());
     }
 
-    let svc: Option<(i64, String, String, String)> = sqlx::query_as(
-        "SELECT id, slug, return_url, mode FROM services
+    let svc: Option<(i64, String, String)> = sqlx::query_as(
+        "SELECT id, slug, return_url FROM services
          WHERE slug = ? AND deleted_at IS NULL AND status = 'approved'",
     )
     .bind(&slug)
     .fetch_optional(&state.pool)
     .await?;
-    let Some((svc_id, svc_slug, return_url, mode)) = svc else {
+    let Some((svc_id, svc_slug, return_url)) = svc else {
         return Err(AppError::NotFound);
     };
 
@@ -799,9 +799,11 @@ pub async fn launch(
         .into_response());
     }
 
-    if mode == "proxy" {
-        return Ok(Redirect::to(&return_url).into_response());
-    }
+    let return_url = match entry(&state, svc_id, return_url).await? {
+        Some(Entry::Token(u)) => u,
+        Some(Entry::Gated(u)) => return Ok(Redirect::to(&u).into_response()),
+        None => return Err(AppError::NotFound),
+    };
 
     let origin = origin_from(&state, &headers);
     let perms = load_user_perms(&state.pool, user.id, svc_id).await?;
@@ -824,6 +826,23 @@ pub async fn launch(
     dest.query_pairs_mut()
         .append_pair("bastion_token", &issued.jwt);
     Ok(Redirect::to(dest.as_str()).into_response())
+}
+
+/// How a signed-in, granted user is sent into a service.
+enum Entry {
+    /// Redirect integration: mint a JWT and append it to this return URL.
+    Token(String),
+    /// Gated at the edge: just go there; the gate reads the session.
+    Gated(String),
+}
+
+/// A return URL means the service verifies bastion's token itself, so that
+/// wins — a service with both gets its token. Otherwise its gated route.
+async fn entry(state: &AppState, service_id: i64, return_url: String) -> AppResult<Option<Entry>> {
+    if !return_url.trim().is_empty() {
+        return Ok(Some(Entry::Token(return_url)));
+    }
+    Ok(crate::proxy::gated_entry_url(state, service_id).await?.map(Entry::Gated))
 }
 
 pub async fn logout(State(state): State<AppState>, cookies: Cookies) -> AppResult<Response> {

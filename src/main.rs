@@ -1,6 +1,8 @@
 mod audit;
 mod db;
+mod edge;
 mod error;
+mod forwarded;
 mod grants;
 mod host;
 mod jwt;
@@ -10,13 +12,18 @@ mod models;
 mod oauth;
 mod proxy;
 mod routes;
+mod serve;
 mod session;
 mod settings;
 mod setup;
 mod state;
 mod templates;
+mod tls;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
+
+use anyhow::{bail, Context};
 
 use axum::{
     middleware as axmw,
@@ -26,7 +33,7 @@ use axum::{
 use tower_cookies::CookieManagerLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::state::AppState;
+use crate::state::{AppState, Edge};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -40,10 +47,10 @@ async fn main() -> anyhow::Result<()> {
     let database_path =
         std::env::var("DATABASE_PATH").unwrap_or_else(|_| "./data/bastion.db".to_string());
     let origin = std::env::var("ORIGIN").ok().filter(|s| !s.is_empty());
-    let port: u16 = std::env::var("PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(5180);
+    let port = env_port("PORT", 5180)?;
+    let trusted = forwarded::Trusted::parse(env("TRUSTED_PROXIES").as_deref())
+        .map_err(anyhow::Error::msg)?;
+    let edge = edge_config(origin.as_deref())?;
 
     tracing::info!(db = %database_path, "connecting to sqlite");
     let pool = db::connect(&database_path).await?;
@@ -51,6 +58,11 @@ async fn main() -> anyhow::Result<()> {
         pool,
         origin,
         proxy: proxy::client(),
+        trusted: Arc::new(trusted),
+        ports: std::iter::once(port)
+            .chain(edge.iter().flat_map(|e| std::iter::once(e.https_port).chain(e.http_port)))
+            .collect(),
+        edge: edge.clone(),
     };
 
     let app = Router::new()
@@ -132,6 +144,13 @@ async fn main() -> anyhow::Result<()> {
             "/admin/services/deny-registration",
             post(routes::admin::deny_registration),
         )
+        .route("/admin/routes", get(routes::admin::routes_page))
+        .route("/admin/routes/new", get(routes::admin::route_new_page))
+        .route("/admin/routes/:id", get(routes::admin::route_detail))
+        .route("/admin/routes/add", post(routes::admin::add_route))
+        .route("/admin/routes/update", post(routes::admin::update_route))
+        .route("/admin/routes/toggle", post(routes::admin::toggle_route))
+        .route("/admin/routes/remove", post(routes::admin::remove_route))
         .route("/admin/providers", get(routes::admin::providers_page))
         .route("/admin/settings", get(routes::admin::settings_page))
         .route(
@@ -170,15 +189,78 @@ async fn main() -> anyhow::Result<()> {
         .layer(axmw::from_fn_with_state(state.clone(), proxy::proxy_gate))
         .layer(CookieManagerLayer::new())
         .layer(TraceLayer::new_for_http())
-        .with_state(state);
+        .with_state(state.clone());
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    tracing::info!(%addr, "bastion listening");
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await?;
+    // The plaintext port always runs. Behind a gateway it is the only one;
+    // as the edge it is the LAN way in that doesn't depend on the certificate.
+    let mut listeners = tokio::task::JoinSet::new();
+    listeners.spawn(serve::plain(bind(port, "http").await?, app.clone()));
+
+    if let Some(edge) = &edge {
+        edge.certs.clone().spawn_reloader();
+        let config = Arc::new(tls::server_config(edge.certs.clone())?);
+        listeners.spawn(serve::tls(bind(edge.https_port, "https").await?, config, app.clone()));
+        if let Some(p) = edge.http_port {
+            let redirect = serve::redirect_app(state.clone(), edge.https_port);
+            listeners.spawn(serve::plain(bind(p, "http → https redirect").await?, redirect));
+        }
+    }
+
+    // The accept loops never return; if one panics, go down with it rather
+    // than limp on with a port silently dead.
+    if let Some(Err(e)) = listeners.join_next().await {
+        bail!("listener crashed: {}", e);
+    }
     Ok(())
+}
+
+fn env(key: &str) -> Option<String> {
+    std::env::var(key).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+fn env_port(key: &str, default: u16) -> anyhow::Result<u16> {
+    match env(key) {
+        Some(s) => s.parse().with_context(|| format!("{} must be a port number, got {:?}", key, s)),
+        None => Ok(default),
+    }
+}
+
+async fn bind(port: u16, what: &str) -> anyhow::Result<tokio::net::TcpListener> {
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("binding {} on {}", what, addr))?;
+    tracing::info!(%addr, "listening ({})", what);
+    Ok(listener)
+}
+
+/// `TLS_CERT` + `TLS_KEY` turn on the edge listeners: TLS on `HTTPS_PORT`
+/// (443) and a redirect to it on `HTTP_PORT` (80, or `off`).
+fn edge_config(origin: Option<&str>) -> anyhow::Result<Option<Arc<Edge>>> {
+    let (cert, key) = match (env("TLS_CERT"), env("TLS_KEY")) {
+        (Some(c), Some(k)) => (c, k),
+        (None, None) => return Ok(None),
+        _ => bail!("TLS_CERT and TLS_KEY go together: set both or neither"),
+    };
+    // As the edge, the only other source for bastion's own name is the Host
+    // and X-Forwarded-Host of whoever connects — anyone on the internet.
+    if origin.is_none() {
+        bail!("TLS_CERT is set but ORIGIN isn't: as the edge, bastion must be told its own name");
+    }
+    let certs = tls::CertStore::load(cert.into(), key.into())?;
+    let info = certs.info();
+    tracing::info!(
+        names = ?info.names,
+        expires = %routes::admin::fmt_time(info.not_after),
+        "loaded TLS certificate"
+    );
+    let http_port = match env("HTTP_PORT").as_deref() {
+        Some("off") | Some("0") => None,
+        _ => Some(env_port("HTTP_PORT", 80)?),
+    };
+    Ok(Some(Arc::new(Edge {
+        certs: Arc::new(certs),
+        https_port: env_port("HTTPS_PORT", 443)?,
+        http_port,
+    })))
 }

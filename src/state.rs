@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::http::HeaderMap;
 use sqlx::SqlitePool;
 
@@ -10,6 +12,19 @@ pub struct AppState {
     /// X-Forwarded-Host / X-Forwarded-Proto). Set ORIGIN env var to pin it
     /// behind a reverse proxy.
     pub origin: Option<String>,
+    /// Peers whose `X-Forwarded-*` headers are believed. See `forwarded.rs`.
+    pub trusted: Arc<crate::forwarded::Trusted>,
+    /// Every port bastion listens on, for spotting an upstream that leads back.
+    pub ports: Arc<[u16]>,
+    /// The edge listeners, when a certificate is configured.
+    pub edge: Option<Arc<Edge>>,
+}
+
+/// What the settings page reports about the edge listeners.
+pub struct Edge {
+    pub certs: Arc<crate::tls::CertStore>,
+    pub https_port: u16,
+    pub http_port: Option<u16>,
 }
 
 pub fn origin_from(state: &AppState, headers: &HeaderMap) -> String {

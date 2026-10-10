@@ -121,8 +121,9 @@ pub async fn user_detail(
     .fetch_all(&state.pool)
     .await?;
 
-    let services: Vec<(i64, String, String, String, bool)> = sqlx::query_as(
-        "SELECT s.id, s.slug, s.name, s.mode,
+    let services: Vec<(i64, String, String, bool, bool)> = sqlx::query_as(
+        "SELECT s.id, s.slug, s.name,
+                EXISTS(SELECT 1 FROM routes r WHERE r.service_id = s.id),
                 EXISTS(SELECT 1 FROM grants g WHERE g.user_id = ? AND g.service_id = s.id)
          FROM services s
          WHERE s.deleted_at IS NULL AND s.status = 'approved'
@@ -270,7 +271,7 @@ pub async fn user_detail(
                 (empty("No services yet.", ""))
             } @else {
                 div.list {
-                    @for (sid, slug, name, mode, granted) in &services {
+                    @for (sid, slug, name, gated, granted) in &services {
                         @let sid_s = sid.to_string();
                         @let ps = perms.get(sid).map(Vec::as_slice).unwrap_or(&[]);
                         @let held = ps.iter().filter(|p| p.held).count();
@@ -281,7 +282,7 @@ pub async fn user_detail(
                                     div.t { a href=(format!("/admin/services/{}", sid)) { (slug) } }
                                     div.s {
                                         (name)
-                                        @if mode == "proxy" { " · proxy" }
+                                        @if *gated { " · gated route" }
                                     }
                                 }
                                 div.meta {

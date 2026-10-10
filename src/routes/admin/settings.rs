@@ -9,8 +9,8 @@ use axum::{
 use maud::html;
 use serde::Deserialize;
 
-use super::ui::{badge, field, header, section, Nav, Tone};
-use super::{admin, ctx, ProxyHealth};
+use super::ui::{badge, field, header, notice, section, Nav, Tone};
+use super::{admin, ctx, fmt_time, rel_time, ProxyHealth};
 use crate::audit::audit;
 use crate::error::{AppError, AppResult};
 use crate::models::UserCtx;
@@ -49,12 +49,54 @@ pub async fn settings_page(
             }
         }))
 
+        (section("Edge", None, None, html! {
+            p.sec-desc {
+                "Set from the environment, since a mistake here is one the admin UI couldn't be "
+                "reached to fix. TLS_CERT and TLS_KEY turn on TLS termination; the plaintext port "
+                "keeps serving either way."
+            }
+            @if let Some(err) = state.edge.as_ref().and_then(|e| e.certs.info().reload_error) {
+                div.notices {
+                    (notice(Tone::Bad, html! {
+                        strong { "The certificate on disk changed but didn't load." }
+                        " Still serving the previous one. " span.code { (err) }
+                    }))
+                }
+            }
+            div.panel {
+                dl.kv {
+                    @if let Some(edge) = &state.edge {
+                        @let cert = edge.certs.info();
+                        @let left = cert.not_after - chrono::Utc::now().timestamp();
+                        dt { "HTTPS" } dd { ":" (edge.https_port) }
+                        dt { "HTTP" } dd {
+                            @if let Some(p) = edge.http_port { ":" (p) " → redirects to https" } @else { "off" }
+                        }
+                        dt { "Certificate" } dd { (edge.certs.cert_path.display()) }
+                        dt { "Covers" } dd { (cert.names.join(", ")) }
+                        dt { "Expires" } dd {
+                            (fmt_time(cert.not_after)) " "
+                            @if left < 0 {
+                                (badge(Tone::Bad, "expired"))
+                            } @else if left < 14 * 86400 {
+                                (badge(Tone::Warn, &format!("{} days left", left / 86400)))
+                            }
+                        }
+                        dt { "Loaded" } dd { (rel_time(cert.loaded_at)) ", re-read when the files change" }
+                    } @else {
+                        dt { "TLS" } dd { "off — a gateway in front terminates it" }
+                    }
+                    dt { "Trusted proxies" } dd { (state.trusted.describe()) }
+                }
+            }
+        }))
+
         (section("Session cookie domain", None, None, html! {
             p.sec-desc {
-                "Proxy mode serves apps on their own hostnames, so the session cookie has to be "
+                "Gated routes serve apps on their own hostnames, so the session cookie has to be "
                 "scoped to a parent domain that covers both bastion and those apps — otherwise "
                 "it's never sent to them and every request looks signed out. Leave it empty "
-                "when nothing is proxied."
+                "when no route is gated."
             }
             div.notices { (health.notices()) }
             div.panel {

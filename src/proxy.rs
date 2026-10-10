@@ -1,8 +1,9 @@
-//! In-process reverse proxy for `mode = 'proxy'` services.
+//! In-process reverse proxy for edge routes (`edge.rs`).
 //!
-//! bastion answers on the app's own hostname, checks the session and the grant,
-//! then forwards the request to `upstream_url` with the caller's identity
-//! attached as headers. The app needs no knowledge of bastion at all.
+//! bastion answers on the app's own hostname and forwards to the route's
+//! upstream. When the route is gated by a service, it first checks the session
+//! and the grant, then attaches the caller's identity as headers. The app
+//! needs no knowledge of bastion at all.
 //!
 //! The alternative is forward auth, where a gateway asks bastion about each
 //! request and does the proxying itself. The trade is straightforward: this way
@@ -21,7 +22,8 @@
 //! therefore has to enumerate by hand.
 
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::{
     body::Body,
@@ -33,31 +35,114 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use sqlx::SqlitePool;
 use tower_cookies::Cookies;
 
+use crate::forwarded::ConnMeta;
 use crate::session::{read_session_cookie, validate_session_token};
 use crate::state::{self_origin, AppState};
 
-/// Plaintext only.
-///
-/// TLS terminates at the gateway in front of bastion, and an upstream is the
-/// app itself — normally on loopback, where encrypting the hop buys nothing.
-/// `validate()` refuses `https://` upstreams to match, so this cannot silently
-/// become the reason a request fails.
-pub type ProxyClient = Client<HttpConnector, Body>;
+type UpstreamClient = Client<HttpsConnector<HttpConnector>, Body>;
+
+/// http and https upstreams, in two flavours: one verifying the upstream's
+/// certificate against the webpki roots, one accepting anything, for LAN
+/// upstreams with a self-signed certificate. Only an edge route can ask for
+/// the second — it is an admin-set flag, never something a service registers.
+#[derive(Clone)]
+pub struct ProxyClient {
+    verified: UpstreamClient,
+    insecure: UpstreamClient,
+}
+
+impl ProxyClient {
+    fn pick(&self, skip_verify: bool) -> &UpstreamClient {
+        if skip_verify {
+            &self.insecure
+        } else {
+            &self.verified
+        }
+    }
+}
 
 pub fn client() -> ProxyClient {
-    let mut connector = HttpConnector::new();
-    connector.set_connect_timeout(Some(Duration::from_secs(10)));
-    connector.set_nodelay(true);
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let tls = |verifier: Option<Arc<dyn rustls::client::danger::ServerCertVerifier>>| {
+        let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .expect("ring supports the default protocol versions");
+        match verifier {
+            Some(v) => builder.dangerous().with_custom_certificate_verifier(v).with_no_client_auth(),
+            None => builder
+                .with_root_certificates(rustls::RootCertStore {
+                    roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+                })
+                .with_no_client_auth(),
+        }
+    };
+    ProxyClient {
+        verified: upstream_client(tls(None)),
+        insecure: upstream_client(tls(Some(Arc::new(AnyCert(provider.clone()))))),
+    }
+}
+
+fn upstream_client(tls: rustls::ClientConfig) -> UpstreamClient {
+    let mut http = HttpConnector::new();
+    http.set_connect_timeout(Some(Duration::from_secs(10)));
+    http.set_nodelay(true);
+    http.enforce_http(false);
+    let connector = hyper_rustls::HttpsConnectorBuilder::new()
+        .with_tls_config(tls)
+        .https_or_http()
+        .enable_http1()
+        .wrap_connector(http);
     // No overall response timeout on purpose: WebSockets and SSE are long-lived
     // by design, and a blanket deadline would sever them.
     Client::builder(TokioExecutor::new())
         .pool_idle_timeout(Duration::from_secs(30))
         .build(connector)
+}
+
+/// Accepts any upstream certificate, still checking the handshake signatures
+/// so the connection is at least encrypted to whoever answered.
+#[derive(Debug)]
+struct AnyCert(Arc<rustls::crypto::CryptoProvider>);
+
+impl rustls::client::danger::ServerCertVerifier for AnyCert {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
+    }
 }
 
 // ──────────────────────── identity ────────────────────────
@@ -76,8 +161,8 @@ pub struct Identity {
 ///
 /// No permissions: a permission catalog is declared by the service itself
 /// through `/api/services/register`, which a proxied app by definition cannot
-/// do, so the header would be empty on every request. Proxy mode is a gate —
-/// the grant is the whole decision.
+/// do, so the header would be empty on every request. A gated route is a
+/// gate — the grant is the whole decision.
 pub fn identity_headers(id: &Identity) -> Vec<(&'static str, String)> {
     let email = id.email.as_deref().map(header_safe).unwrap_or_default();
     vec![
@@ -147,7 +232,7 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
 /// `None` if nothing is left to send.
 ///
 /// The session token is a bearer credential — `validate_session_token` needs
-/// nothing besides it — and proxy mode requires a `cookie_domain`, so the
+/// nothing besides it — and a gated route requires a `cookie_domain`, so the
 /// browser sends `bastion_session` to every gated host. Forwarding it would
 /// hand each proxied app, its access logs and anything that compromises it a
 /// credential good for bastion's own admin UI, `/account`, and every other
@@ -247,13 +332,15 @@ pub fn glob_match(pattern: &str, s: &str) -> bool {
 
 // ──────────────────────── redirect allowlist ────────────────────────
 
-/// Validate a post-login redirect target against the registered proxy hosts.
+/// Validate a post-login redirect target against the gated routes.
 ///
 /// This is the one place a URL from the query string is handed back to the
 /// browser, so it is an open redirect in bastion's own SSO unless the host is
 /// checked against the DB. Substring or prefix matching would not be enough —
-/// `https://evil.com/?x=app.example.com` has to fail — so the parsed host must
-/// equal a `proxy_host` exactly.
+/// `https://evil.com/?x=app.example.com` has to fail — so the parsed host is
+/// put through the same lookup the router uses, and has to land on a route
+/// gated by a live service (that service, when one is named). A wildcard route
+/// covers its names here exactly as it does for traffic.
 pub async fn validate_redirect(
     pool: &SqlitePool,
     raw: &str,
@@ -266,29 +353,13 @@ pub async fn validate_redirect(
     if !u.username().is_empty() || u.password().is_some() {
         return None;
     }
-    let host = u.host_str()?.to_ascii_lowercase();
-
-    let row: Option<(i64,)> = match service_slug {
-        Some(slug) => sqlx::query_as(
-            "SELECT id FROM services
-             WHERE proxy_host = ? AND slug = ?
-               AND status = 'approved' AND deleted_at IS NULL",
-        )
-        .bind(&host)
-        .bind(slug)
-        .fetch_optional(pool)
-        .await
-        .ok()?,
-        None => sqlx::query_as(
-            "SELECT id FROM services
-             WHERE proxy_host = ? AND status = 'approved' AND deleted_at IS NULL",
-        )
-        .bind(&host)
-        .fetch_optional(pool)
-        .await
-        .ok()?,
-    };
-    row.map(|_| u.to_string())
+    let host = crate::host::bare(u.host_str()?);
+    let route = crate::edge::lookup(pool, &host).await.ok()??;
+    let gate = gate_service(pool, route.service_id?).await.ok()??;
+    if service_slug.is_some_and(|s| s != gate.slug) {
+        return None;
+    }
+    Some(u.to_string())
 }
 
 /// Whether a denial should be answered with a redirect to the login page.
@@ -318,21 +389,41 @@ pub fn wants_html(headers: &HeaderMap) -> bool {
 
 // ──────────────────────── the middleware ────────────────────────
 
-struct Gated {
+/// The service a route is gated by.
+struct Gate {
     id: i64,
     slug: String,
-    /// The registered `proxy_host`. Equal to the request's host by the `WHERE`
-    /// clause that found this row, but this is the copy that came from the DB —
-    /// so it, not the request, is what public URLs get built from.
-    host: String,
-    upstream: String,
-    public_paths: Option<String>,
 }
 
-/// Routes a request to a proxied app if its `Host` names one, otherwise passes
-/// it through to bastion's own router.
+/// The live service behind a route's `service_id`, or `None` if it has been
+/// removed or isn't approved — which the caller must treat as *closed*.
+async fn gate_service(pool: &SqlitePool, id: i64) -> Result<Option<Gate>, sqlx::Error> {
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT slug FROM services WHERE id = ? AND status = 'approved' AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(slug,)| Gate { id, slug }))
+}
+
+/// Where a request is about to be forwarded.
+struct Hop {
+    /// Route name, for logs.
+    label: String,
+    /// The public hostname, matched against config — what public URLs are
+    /// built from. For a wildcard route it is the request's own host, which is
+    /// safe because it had to match the configured pattern to get here.
+    host: String,
+    upstream: String,
+    skip_verify: bool,
+}
+
+/// Forwards a request to an edge route if its `Host` names one — through the
+/// gate first if the route has one — otherwise passes it through to bastion's
+/// own router.
 ///
-/// Sits outside `load_user` and `setup_gate`: a gated host is not part of
+/// Sits outside `load_user` and `setup_gate`: a routed host is not part of
 /// bastion's UI and must not be redirected into the setup wizard.
 pub async fn proxy_gate(
     State(state): State<AppState>,
@@ -345,92 +436,83 @@ pub async fn proxy_gate(
         return next.run(req).await;
     };
 
-    let row: Result<Option<(i64, String, Option<String>, Option<String>)>, _> = sqlx::query_as(
-        "SELECT id, slug, upstream_url, public_paths FROM services
-         WHERE proxy_host = ? AND mode = 'proxy'
-           AND status = 'approved' AND deleted_at IS NULL",
-    )
-    .bind(&host)
-    .fetch_optional(&state.pool)
-    .await;
+    // bastion's own name first, so a wildcard route that happens to cover it
+    // can't take over the admin UI.
+    if is_own_host(&state, &host) {
+        return next.run(req).await;
+    }
 
-    let svc = match row {
-        Ok(Some((id, slug, Some(upstream), public_paths))) => Gated {
-            id,
-            slug,
-            host: host.clone(),
-            upstream,
-            public_paths,
-        },
-        // Registered as a proxy host but with no upstream: refuse rather than
-        // fall through to bastion's own UI, which would serve the wrong site.
-        Ok(Some((_, slug, None, _))) => {
-            tracing::error!(%slug, %host, "proxy service has no upstream_url");
-            return bad_gateway("this app has no upstream configured");
-        }
+    let route = match crate::edge::lookup(&state.pool, &host).await {
+        Ok(Some(route)) => route,
+        // Unpinned, bastion has no idea what it is called, so anything that
+        // isn't routed elsewhere is taken to be bastion.
+        Ok(None) if state.origin.is_none() => return next.run(req).await,
+        // Serve bastion's own UI only under a name that is actually bastion's:
+        // a decommissioned host whose DNS still points here would otherwise
+        // serve the entire instance under that name. Auth still holds either
+        // way, but a login page answering to an arbitrary name is worth not
+        // doing.
         Ok(None) => {
-            // Not a gated host. Serve bastion's own UI only under a name that
-            // is actually bastion's: a decommissioned proxy host whose DNS
-            // still points here would otherwise serve the entire instance
-            // under that name. Auth still holds either way, but a login page
-            // answering to an arbitrary name is worth not doing.
-            if !is_bastion_host(&state, &host) {
-                tracing::warn!(%host, "request for a host bastion does not serve");
-                return StatusCode::NOT_FOUND.into_response();
-            }
-            return next.run(req).await;
+            tracing::warn!(%host, "request for a host bastion does not serve");
+            return StatusCode::NOT_FOUND.into_response();
         }
         Err(e) => {
-            tracing::error!(error = ?e, "proxy service lookup");
-            return bad_gateway("could not look up this app");
+            tracing::error!(error = ?e, "route lookup");
+            return bad_gateway("could not look up this host");
         }
     };
 
-    // Already been through here once, so the upstream leads back to bastion.
-    // Left unchecked this recurses until the process runs out of descriptors.
-    if req.headers().contains_key(LOOP_MARKER) {
-        tracing::error!(
-            slug = %svc.slug, upstream = %svc.upstream,
-            "proxy loop — upstream resolves back to bastion"
-        );
-        return (
-            StatusCode::LOOP_DETECTED,
-            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            "proxy loop: this app's upstream leads back to bastion",
-        )
-            .into_response();
+    let hop = Hop {
+        label: route.name,
+        host,
+        upstream: route.upstream,
+        skip_verify: route.skip_verify,
+    };
+    if let Some(refused) = refuse_unforwardable(&req, &hop) {
+        return refused;
     }
+
+    let Some(service_id) = route.service_id else {
+        return forward(&state, &hop, req, None, peer).await;
+    };
+
+    // A route gated by a service that has since been removed stays shut. The
+    // alternative — quietly forwarding with no gate — would turn removing a
+    // service into publishing whatever it was protecting.
+    let svc = match gate_service(&state.pool, service_id).await {
+        Ok(Some(svc)) => svc,
+        Ok(None) => {
+            tracing::error!(via = %hop.label, service_id, "route gated by a service that no longer exists");
+            return misconfigured(
+                "This route is protected by a service that has been removed, so it is \
+                 closed. An admin needs to pick another service for it, or open it up.",
+            );
+        }
+        Err(e) => {
+            tracing::error!(error = ?e, "gate service lookup");
+            return bad_gateway("could not check access for this app");
+        }
+    };
 
     let path = req.uri().path().to_string();
-
-    // Before any routing decision, and for every proxied request rather than
-    // only the public ones: a dot-segment makes the path bastion matches on and
-    // the path the upstream resolves two different things, and every rule below
-    // is written against the former.
-    if has_dot_segment(&path) {
-        tracing::warn!(slug = %svc.slug, %path, "rejected dot-segment in proxied path");
-        return (StatusCode::BAD_REQUEST, "bad request path").into_response();
-    }
-
-    let patterns = parse_public_paths(svc.public_paths.as_deref());
+    let patterns = parse_public_paths(route.public_paths.as_deref());
     if is_public_path(&patterns, &path) {
-        return forward(&state, &svc, req, None, peer).await;
+        return forward(&state, &hop, req, None, peer).await;
     }
 
     // Everything past this point needs the session cookie to survive the trip
     // from bastion's hostname to this one, which only a cookie domain arranges.
     // Without one the browser would be sent to log in, come back with nothing,
-    // and be sent to log in again, forever — and that is the state a service
-    // is in the moment it is first switched to proxy mode. Say so instead.
+    // and be sent to log in again, forever — and that is the state a route is
+    // in the moment it is first gated. Say so instead.
     if crate::settings::cookie_domain(&state.pool).await.is_none() {
         tracing::error!(
-            slug = %svc.slug,
-            "proxy mode with no cookie_domain — sessions cannot reach this host"
+            via = %hop.label,
+            "gated route with no cookie_domain — sessions cannot reach this host"
         );
         return misconfigured(
             "No session cookie domain is set, so sign-in cannot carry across to \
-             this hostname. An admin needs to set one under Proxy mode in \
-             bastion's service settings.",
+             this hostname. An admin needs to set one in bastion's settings.",
         );
     }
 
@@ -446,7 +528,8 @@ pub async fn proxy_gate(
     let html = wants_html(req.headers());
 
     let Some(user) = user else {
-        let (scheme, authority) = public_origin(&state, &svc.host, &req);
+        let proto = forwarded(&state, &req, peer).proto;
+        let (scheme, authority) = public_origin(&state, &hop.host, proto, &req);
         let target = format!("{}://{}{}", scheme, authority, req.uri());
         return deny(
             StatusCode::UNAUTHORIZED,
@@ -492,7 +575,77 @@ pub async fn proxy_gate(
         email: user.email.clone(),
         sub: crate::jwt::identity_hash(&user.sub_anchor_provider, &user.sub_anchor_provider_id),
     };
-    forward(&state, &svc, req, Some(identity), peer).await
+    forward(&state, &hop, req, Some(identity), peer).await
+}
+
+/// Checks every forwarded request gets, gated or not, before anything else.
+fn refuse_unforwardable(req: &Request, hop: &Hop) -> Option<Response> {
+    // Already been through here once, so the upstream leads back to bastion.
+    // Left unchecked this recurses until the process runs out of descriptors.
+    if req.headers().contains_key(LOOP_MARKER) {
+        tracing::error!(
+            via = %hop.label, upstream = %hop.upstream,
+            "proxy loop — upstream resolves back to bastion"
+        );
+        return Some(
+            (
+                StatusCode::LOOP_DETECTED,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                "proxy loop: this app's upstream leads back to bastion",
+            )
+                .into_response(),
+        );
+    }
+
+    // Before any routing decision, and for every proxied request rather than
+    // only the public ones: a dot-segment makes the path bastion matches on and
+    // the path the upstream resolves two different things, and every rule
+    // after this is written against the former. Ungated routes get it too —
+    // nginx normalised paths before handing them on, and an upstream that
+    // grew up behind it may never have had to.
+    let path = req.uri().path();
+    if has_dot_segment(path) {
+        tracing::warn!(via = %hop.label, %path, "rejected dot-segment in proxied path");
+        return Some((StatusCode::BAD_REQUEST, "bad request path").into_response());
+    }
+    None
+}
+
+/// Whether anything — bastion or a route — answers on this host.
+pub async fn serves_host(state: &AppState, host: &str) -> Result<bool, sqlx::Error> {
+    if is_own_host(state, host) {
+        return Ok(true);
+    }
+    Ok(crate::edge::lookup(&state.pool, host).await?.is_some())
+}
+
+/// Where to send someone into a service gated at the edge: its first exact
+/// hostname, on the scheme and port bastion serves routes on.
+pub async fn gated_entry_url(state: &AppState, service_id: i64) -> Result<Option<String>, sqlx::Error> {
+    let host: Option<(String,)> = sqlx::query_as(
+        "SELECT h.host FROM route_hosts h JOIN routes r ON r.id = h.route_id
+         WHERE r.service_id = ? AND r.enabled = 1 AND h.host NOT LIKE '*.%'
+         ORDER BY r.id, h.host LIMIT 1",
+    )
+    .bind(service_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    Ok(host.map(|(h,)| {
+        let (scheme, port) = match (&state.edge, state.origin.as_deref().and_then(|o| url::Url::parse(o).ok())) {
+            (Some(edge), _) => ("https".to_string(), (edge.https_port != 443).then_some(edge.https_port)),
+            (None, Some(o)) => (o.scheme().to_string(), o.port()),
+            (None, None) => ("https".to_string(), None),
+        };
+        match port {
+            Some(p) => format!("{}://{}:{}/", scheme, h, p),
+            None => format!("{}://{}/", scheme, h),
+        }
+    }))
+}
+
+fn forwarded(state: &AppState, req: &Request, peer: SocketAddr) -> crate::forwarded::Forwarded {
+    let conn = req.extensions().get::<ConnMeta>().copied().unwrap_or_default();
+    crate::forwarded::resolve(&state.trusted, peer.ip(), req.headers(), conn)
 }
 
 /// Mirrors the access request the OAuth callback files on a service redirect,
@@ -526,16 +679,18 @@ async fn record_access_request(
 
 async fn forward(
     state: &AppState,
-    svc: &Gated,
+    hop: &Hop,
     mut req: Request,
     identity: Option<Identity>,
     peer: SocketAddr,
 ) -> Response {
+    let started = Instant::now();
+    let fwd = forwarded(state, &req, peer);
     // From the DB and ORIGIN, not from the request: this feeds X-Forwarded-Host,
     // X-Forwarded-Proto and the Location rewrite, and the client must not get to
     // choose any of them. Includes the port, without which all three are wrong
     // on a non-default port.
-    let (scheme, authority) = public_origin(state, &svc.host, &req);
+    let (scheme, authority) = public_origin(state, &hop.host, fwd.proto, &req);
 
     let path_and_query = req
         .uri()
@@ -544,19 +699,21 @@ async fn forward(
         .unwrap_or("/");
     let target: Uri = match format!(
         "{}{}",
-        svc.upstream.trim_end_matches('/'),
+        hop.upstream.trim_end_matches('/'),
         path_and_query
     )
     .parse()
     {
         Ok(u) => u,
         Err(e) => {
-            tracing::error!(error = ?e, upstream = %svc.upstream, "bad upstream url");
+            tracing::error!(error = ?e, upstream = %hop.upstream, "bad upstream url");
             return bad_gateway("this app's upstream URL is not valid");
         }
     };
 
     let upgrade = req.headers().get(header::UPGRADE).cloned();
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
 
     let mut out = Request::builder().method(req.method()).uri(target);
     {
@@ -564,7 +721,14 @@ async fn forward(
         // Built from scratch, not edited: anything the client sent in bastion's
         // identity namespace is simply never copied across.
         for (name, value) in req.headers() {
-            if is_hop_by_hop(name) || is_identity_header(name) || name == header::COOKIE {
+            if is_hop_by_hop(name)
+                || is_identity_header(name)
+                || name == header::COOKIE
+                // RFC 7239's version of the X-Forwarded-* set below. Nothing
+                // vouches for a client's copy, and passing it on alongside
+                // ours would give an upstream two stories to pick from.
+                || name == header::FORWARDED
+            {
                 continue;
             }
             h.append(name, value.clone());
@@ -582,12 +746,10 @@ async fn forward(
         }
         set(h, "x-forwarded-host", &authority);
         set(h, "x-forwarded-proto", &scheme);
-        set(h, "x-real-ip", &peer.ip().to_string());
-        let fwd = match req.headers().get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-            Some(prev) => format!("{}, {}", prev, peer.ip()),
-            None => peer.ip().to_string(),
-        };
-        set(h, "x-forwarded-for", &fwd);
+        // Both resolved against TRUSTED_PROXIES: the socket peer is only the
+        // client when nothing we trust sits in between.
+        set(h, "x-real-ip", &fwd.client.to_string());
+        set(h, "x-forwarded-for", &fwd.chain);
 
         set(h, LOOP_MARKER, "1");
         if let Some(id) = &identity {
@@ -612,30 +774,43 @@ async fn forward(
         }
     };
 
-    let mut res = match state.proxy.request(out_req).await {
+    let mut res = match state.proxy.pick(hop.skip_verify).request(out_req).await {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(error = %e, slug = %svc.slug, upstream = %svc.upstream, "upstream unreachable");
+            tracing::warn!(error = ?e, via = %hop.label, upstream = %hop.upstream, "upstream unreachable");
             return bad_gateway("this app is not responding");
         }
     };
+
+    // Time to response headers, not to the end of the body — a download or a
+    // WebSocket would otherwise log its whole lifetime.
+    tracing::info!(
+        target: "bastion::access",
+        client = %fwd.client,
+        host = %hop.host,
+        %method,
+        %path,
+        status = res.status().as_u16(),
+        ms = started.elapsed().as_millis() as u64,
+        via = %hop.label,
+    );
 
     // A 101 means both sides want to switch protocols; splice the two
     // connections together once each has finished upgrading. Protocol-agnostic,
     // so WebSockets and anything else built on Upgrade both work.
     if res.status() == StatusCode::SWITCHING_PROTOCOLS {
         let upstream_upgrade = hyper::upgrade::on(&mut res);
-        let slug = svc.slug.clone();
+        let via = hop.label.clone();
         tokio::spawn(async move {
             match tokio::try_join!(client_upgrade, upstream_upgrade) {
                 Ok((downstream, upstream)) => {
                     let mut a = TokioIo::new(downstream);
                     let mut b = TokioIo::new(upstream);
                     if let Err(e) = tokio::io::copy_bidirectional(&mut a, &mut b).await {
-                        tracing::debug!(error = %e, %slug, "upgraded connection closed");
+                        tracing::debug!(error = %e, %via, "upgraded connection closed");
                     }
                 }
-                Err(e) => tracing::warn!(error = %e, %slug, "upgrade failed"),
+                Err(e) => tracing::warn!(error = %e, %via, "upgrade failed"),
             }
         });
         let (parts, _) = res.into_parts();
@@ -652,7 +827,7 @@ async fn forward(
     for name in strip {
         parts.headers.remove(&name);
     }
-    rewrite_location(&mut parts.headers, &svc.upstream, &scheme, &authority);
+    rewrite_location(&mut parts.headers, &hop.upstream, &scheme, &authority);
 
     Response::from_parts(parts, Body::new(body))
 }
@@ -695,7 +870,7 @@ fn set(h: &mut HeaderMap, name: &str, value: &str) {
 ///
 /// This is the one to build URLs from — a return URL or a rewritten `Location`
 /// that drops a non-default port sends the browser somewhere that isn't
-/// listening. Use [`request_host`] for matching against `proxy_host`, which is
+/// listening. Use [`request_host`] for matching against route hostnames, which is
 /// stored without a port.
 fn request_authority(req: &Request) -> Option<String> {
     let raw = req
@@ -712,31 +887,32 @@ fn request_authority(req: &Request) -> Option<String> {
     (!raw.is_empty()).then_some(raw)
 }
 
-/// Whether bastion should serve its own UI under this hostname.
+/// Whether this is a name bastion knows to be its own.
 ///
-/// Only meaningful once `ORIGIN` is pinned; unpinned, bastion has no idea what
-/// it is called and anything goes. Loopback and bare IPs are always allowed:
-/// an `nginx` in front that hasn't been given `proxy_set_header Host $host`
-/// sends its own upstream address, and health checks dial the container
-/// directly — neither should 404.
-fn is_bastion_host(state: &AppState, host: &str) -> bool {
-    let Some(origin) = &state.origin else {
-        return true;
-    };
+/// Loopback and bare IPs always are: an `nginx` in front that hasn't been
+/// given `proxy_set_header Host $host` sends its own upstream address, and
+/// health checks dial the container directly — neither should 404. Otherwise
+/// only `ORIGIN`'s host; unpinned, bastion doesn't know its name, and
+/// `route_or_bastion` falls back to serving the UI once no route claims it.
+fn is_own_host(state: &AppState, host: &str) -> bool {
     if host == "localhost" || host.parse::<std::net::IpAddr>().is_ok() || host.starts_with('[') {
         return true;
     }
-    crate::host::of_url(origin).map(|h| h == host).unwrap_or(true)
+    state
+        .origin
+        .as_deref()
+        .and_then(crate::host::of_url)
+        .is_some_and(|h| h == host)
 }
 
 /// The public origin of a gated app as **bastion** knows it: `(scheme,
 /// authority)`.
 ///
-/// The host is the registered `proxy_host`; scheme and port come from `ORIGIN`,
+/// The host is the one the route matched; scheme and port come from `ORIGIN`,
 /// which is sound because one process serves every gated host on one port.
 ///
 /// Echoing the request instead would let the client pick both halves.
-/// `request_host` strips the port before matching `proxy_host`, so
+/// `request_host` strips the port before matching a route, so
 /// `Host: app.example.com:1337` matches the service and would then go upstream
 /// as `X-Forwarded-Host: app.example.com:1337`; `X-Forwarded-Proto` is worse
 /// still, being copied straight from the client with no trusted-gateway check.
@@ -746,36 +922,42 @@ fn is_bastion_host(state: &AppState, host: &str) -> bool {
 ///
 /// With `ORIGIN` unset there is nothing better than the request to fall back
 /// on, which is one more reason the admin UI warns about leaving it unpinned.
-fn public_origin(state: &AppState, proxy_host: &str, req: &Request) -> (String, String) {
+/// `proto` is then the scheme as `forwarded::resolve` worked it out — only
+/// believing `X-Forwarded-Proto` from a trusted proxy.
+///
+/// A request that arrived on bastion's own TLS listener is the exception, and
+/// the more precise case: the listener says exactly how it was reached — https,
+/// on `HTTPS_PORT` — and that is config too, not something the client picked.
+/// `ORIGIN` only describes how bastion itself is reached, which in dev is the
+/// plaintext port.
+fn public_origin(state: &AppState, host: &str, proto: &str, req: &Request) -> (String, String) {
+    let on_tls = req.extensions().get::<ConnMeta>().is_some_and(|c| c.tls);
+    if let (true, Some(edge)) = (on_tls, &state.edge) {
+        let authority = match edge.https_port {
+            443 => host.to_string(),
+            p => format!("{}:{}", host, p),
+        };
+        return ("https".to_string(), authority);
+    }
     if let Some(origin) = &state.origin {
         if let Ok(u) = url::Url::parse(origin) {
             let authority = match u.port() {
-                Some(p) => format!("{}:{}", proxy_host, p),
-                None => proxy_host.to_string(),
+                Some(p) => format!("{}:{}", host, p),
+                None => host.to_string(),
             };
             return (u.scheme().to_string(), authority);
         }
     }
     (
-        request_scheme(req).to_string(),
-        request_authority(req).unwrap_or_else(|| proxy_host.to_string()),
+        proto.to_string(),
+        request_authority(req).unwrap_or_else(|| host.to_string()),
     )
 }
 
-/// Hostname only, port stripped, for matching against `proxy_host`.
-fn request_host(req: &Request) -> Option<String> {
+/// Hostname only, port stripped, for matching against route hostnames.
+pub fn request_host(req: &Request) -> Option<String> {
     let h = crate::host::bare(&request_authority(req)?);
     (!h.is_empty()).then_some(h)
-}
-
-fn request_scheme(req: &Request) -> &str {
-    req.headers()
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(str::trim)
-        .filter(|s| *s == "http" || *s == "https")
-        .unwrap_or("http")
 }
 
 fn deny(status: StatusCode, redirect: Option<String>) -> Response {
@@ -850,7 +1032,7 @@ mod tests {
 
     #[test]
     fn bastion_session_never_reaches_an_upstream() {
-        // proxy mode requires a cookie_domain, so the browser sends the session
+        // a gated route requires a cookie_domain, so the browser sends the session
         // token to every gated host. It is a bearer credential for bastion
         // itself — the app must never see it, however much it is trusted.
         let out = strip_bastion_cookies("app_sid=abc; bastion_session=SECRET; theme=dark").unwrap();
@@ -963,7 +1145,7 @@ mod tests {
 
     #[test]
     fn host_matches_without_a_port_but_urls_keep_it() {
-        // proxy_host is stored without a port, so lookups strip it...
+        // route hostnames are stored without a port, so lookups strip it...
         assert_eq!(
             request_host(&req(&[("host", "App.Example.com:8443")])).as_deref(),
             Some("app.example.com")

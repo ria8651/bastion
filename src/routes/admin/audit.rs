@@ -92,12 +92,14 @@ fn tone(action: &str) -> &'static str {
         || action.ends_with(".revoke")
         || action.ends_with(".revoke_all")
         || action.ends_with(".remove")
+        || action.ends_with(".disable")
         || action.ends_with("_cleared")
         || action.ends_with("_unlinked")
     {
         "bad"
     } else if action.ends_with(".add")
         || action.ends_with(".approve")
+        || action.ends_with(".enable")
         || action.ends_with(".grant")
         || action.ends_with("_configured")
         || action.ends_with("_linked")

@@ -12,9 +12,18 @@ tower-cookies = "0.10"
 
 # In-process reverse proxy for mode='proxy' services. reqwest can't do this:
 # splicing an Upgrade needs the raw connection on both sides.
-hyper = { version = "1", features = ["client", "http1"] }
+hyper = { version = "1", features = ["client", "server", "http1"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
 http-body-util = "0.1"
+
+# Edge TLS: terminating client connections, and https upstreams. ring, since
+# reqwest already pulls it in; x509-parser only reads the cert's names and
+# expiry for the admin UI.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "tls12", "logging"] }
+x509-parser = "0.17"
+webpki-roots = "1"
 
 sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio", "chrono", "macros", "migrate"] }
 

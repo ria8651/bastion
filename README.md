@@ -12,7 +12,7 @@ Apps integrate either by **verifying a JWT** (the app knows about bastion) or by
 - ✅ **First-run setup wizard** — no env-based bootstrap
 - ✅ **Google OAuth** — multi-provider identities, `/account` link/unlink
 - ✅ **Phase 4** — Fine-grained per-service permissions
-- ✅ **Proxy mode** — bastion reverse-proxies and gates apps that know nothing about it
+- ✅ **Gated routes** — bastion reverse-proxies and gates apps that know nothing about it
 
 ## Run (dev)
 
@@ -28,7 +28,11 @@ Open <http://localhost:5180> → complete the setup wizard (OAuth creds → clai
 |---|---|---|
 | `DATABASE_PATH` | `./data/bastion.db` | SQLite file path |
 | `ORIGIN` | (derived from request headers) | Public-facing URL, e.g. `https://auth.example.com`. Set behind a reverse proxy if it doesn't forward `X-Forwarded-{Host,Proto}`. |
-| `PORT` | `5180` | Listen port |
+| `PORT` | `5180` | Plaintext listen port. Always on, edge mode or not. |
+| `TLS_CERT`, `TLS_KEY` | (unset) | PEM certificate chain and key. Setting both makes bastion the edge: TLS on `HTTPS_PORT`, a redirect on `HTTP_PORT`. Requires `ORIGIN`. Re-read within a minute when the files change. |
+| `HTTPS_PORT` | `443` | TLS listener, edge mode only |
+| `HTTP_PORT` | `80` | Redirects known hosts to https, edge mode only. `off` to disable. |
+| `TRUSTED_PROXIES` | loopback + private ranges | Comma-separated IPs/CIDRs whose `X-Forwarded-{For,Proto}` are believed, or `none` |
 | `RUST_LOG` | `info,sqlx=warn,tower_http=info` | Tracing filter |
 
 Everything else — OAuth credentials, services, the session cookie domain — lives in the database and is managed from `/setup` and `/admin`.
@@ -54,7 +58,13 @@ volumes:
   bastion_data:
 ```
 
-Terminate TLS at nginx/Caddy and proxy to `127.0.0.1:5180` with `X-Forwarded-Proto` + `X-Forwarded-Host` set (or pin `ORIGIN` explicitly).
+Either terminate TLS at nginx/Caddy and proxy to `127.0.0.1:5180` with `X-Forwarded-Proto` + `X-Forwarded-Host` set (or pin `ORIGIN` explicitly), or let bastion be the edge — see below.
+
+## Edge mode
+
+Set `TLS_CERT` + `TLS_KEY` (and publish 80 and 443) and bastion terminates TLS itself, routing every hostname from the database. **Routes** (`/admin/routes`) map hostnames — `media.example.com` or `*.apps.example.com` — to an upstream like `http://192.168.1.8:8096`, or an `https://` one, optionally accepting a self-signed certificate. A route is open, or gated by a service.
+
+bastion doesn't issue certificates. Point it at whatever certbot / your DNS-01 client / private CA writes, and it picks up renewals without a restart; a renewal that fails to parse keeps the old pair serving, and the settings page shows the expiry. A deploy restarts the edge, so connections drop.
 
 ## Integrating a service
 
@@ -76,17 +86,17 @@ Fresh grant/perm state is available via `GET /api/introspect` with an `Authoriza
 
 ## Gating an app that knows nothing about bastion
 
-Switch a service to **proxy mode** and bastion serves the app's hostname itself: it checks the session and the grant, then forwards upstream with the caller's identity attached as headers. No gateway config, no auth code in the app.
+Put a **route** in front of it, gated by a service, and bastion serves the app's hostname itself: it checks the session and the grant, then forwards upstream with the caller's identity attached as headers. No gateway config, no auth code in the app.
 
-Setup, in `/admin/services`:
+Setup:
 
-1. **Set a session cookie domain** under *Proxy mode* (e.g. `example.com`). Sign-in happens on bastion's own hostname, so a host-only cookie is never sent to the app. This is required, not advisory — without it a gated host answers 503 rather than bouncing the browser between bastion and the app forever. It must cover bastion's own host, which is checked when you save it. Use a domain you control end to end; every host under it receives the token.
-2. **Pin `ORIGIN`**, since a proxied request's `Host` is the app's hostname, not bastion's.
-3. **Add the service** in proxy mode with its public hostname and upstream (`http://127.0.0.1:8080`), then point that hostname's DNS and TLS at bastion.
+1. **Set a session cookie domain** in *Settings* (e.g. `example.com`). Sign-in happens on bastion's own hostname, so a host-only cookie is never sent to the app. This is required, not advisory — without it a gated host answers 503 rather than bouncing the browser between bastion and the app forever. It must cover bastion's own host, which is checked when you save it. Use a domain you control end to end; every host under it receives the token.
+2. **Pin `ORIGIN`**, since a gated request's `Host` is the app's hostname, not bastion's.
+3. **Create a service** (no return URL needed) — it's who may get in — then **add a route** with the app's hostname and upstream (`http://127.0.0.1:8080`), gated by that service. Point the hostname's DNS at bastion.
 
 The app receives `X-Bastion-User`, `-Sub` (the same stable `sub` as the JWT) and `-Email`, plus `Remote-User`/`Remote-Email` for off-the-shelf apps that already read those. It's free to ignore all of them; the gate has already happened.
 
-No permissions are sent. A permission catalog is declared by the service through `/api/services/register`, which a proxied app can't do — so proxy mode is a plain gate and per-service permissions stay a redirect-mode feature.
+No permissions are sent. A permission catalog is declared by the service through `/api/services/register`, which an app behind a gated route can't do — so the gate is just the grant, and per-service permissions travel in the JWT only.
 
 Three things worth knowing. **Forged identity headers are impossible by construction** — the outbound header map is built from scratch and bastion's whole header namespace is dropped from the inbound request, with no configuration involved. **Revocation is immediate**, because every request re-reads the session and the grant. And **bastion is now in the data path**: bodies stream rather than buffer, WebSockets and other `Upgrade` protocols are spliced through, but bastion's uptime is the app's uptime.
 
@@ -96,7 +106,9 @@ Per-service *public paths* skip auth entirely for health probes and webhooks; `*
 
 ```
 users            github-linked accounts, status: active|pending|denied, is_admin flag
-services         registered apps (slug, return_url, mode, proxy_host, upstream_url, public_paths)
+services         who may get in: slug, grants; return_url ('' = none) for JWT apps
+routes           hostnames → upstream (tls_skip_verify, enabled); service_id gates, public_paths skip the gate
+route_hosts      one row per hostname or *.wildcard a route answers on
 grants           which users can access which services
 permissions      per-service permission keys (unused until phase 4)
 user_perms       fine-grained permission assignments
@@ -119,7 +131,11 @@ src/
   models.rs         User, Service, UserCtx, ...
   session.rs        token gen, sha256 store, sliding renewal, cookie scoping
   settings.rs       instance-wide key/value config
-  proxy.rs          reverse proxy for mode='proxy': gate, header injection, upgrades
+  proxy.rs          reverse proxy for routes: gate, header injection, upgrades
+  edge.rs           route lookup (exact, then wildcards), hostname + upstream validation
+  forwarded.rs      TRUSTED_PROXIES, real client IP, scheme
+  serve.rs          plaintext / TLS / redirect listeners on hyper
+  tls.rs            cert pair from disk, hot reload
   host.rs           hostname normalisation + cookie-domain containment
   grants.rs         "is this user allowed into this service"
   oauth.rs          GitHub OAuth (authorize URL, code exchange, /user fetch)

@@ -15,6 +15,7 @@ pub enum Nav {
     Users,
     Requests,
     Services,
+    Routes,
     Providers,
     Settings,
     Audit,
@@ -25,6 +26,7 @@ pub struct NavCounts {
     pub pending_requests: i64,
     pub services: i64,
     pub pending_services: i64,
+    pub routes: i64,
 }
 
 /// Everything the shell needs besides the page body.
@@ -89,6 +91,7 @@ fn shell(ctx: &Ctx, active: Nav, title: &str, body: Markup) -> Markup {
                     div.label { "Apps" }
                     (nav_item("Services", "/admin/services", active == Nav::Services,
                         Count::attn(c.pending_services).or(Some(Count::plain(c.services)))))
+                    (nav_item("Routes", "/admin/routes", active == Nav::Routes, Some(Count::plain(c.routes))))
                 }
                 nav.adm-nav aria-label="System" {
                     div.label { "System" }

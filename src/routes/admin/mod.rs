@@ -17,6 +17,7 @@ mod audit;
 mod overview;
 mod providers;
 mod requests;
+mod routes;
 mod services;
 mod settings;
 pub mod ui;
@@ -26,6 +27,7 @@ pub use audit::*;
 pub use overview::*;
 pub use providers::*;
 pub use requests::*;
+pub use routes::*;
 pub use services::*;
 pub use settings::*;
 pub use users::*;
@@ -70,20 +72,21 @@ async fn ctx(
     let user = user.map(|Extension(u)| u);
     let viewer = require_admin(user.as_ref())?.clone();
     let host = host_from_origin(&origin_from(state, headers)).to_string();
-    let (users, pending_requests, services, pending_services): (i64, i64, i64, i64) =
+    let (users, pending_requests, services, pending_services, routes): (i64, i64, i64, i64, i64) =
         sqlx::query_as(&format!(
             "SELECT
                (SELECT COUNT(*) FROM users),
                (SELECT COUNT(*) FROM access_requests r WHERE {OPEN_REQUEST}),
                (SELECT COUNT(*) FROM services WHERE deleted_at IS NULL AND status = 'approved'),
-               (SELECT COUNT(*) FROM services WHERE deleted_at IS NULL AND status = 'pending')",
+               (SELECT COUNT(*) FROM services WHERE deleted_at IS NULL AND status = 'pending'),
+               (SELECT COUNT(*) FROM routes)",
         ))
         .fetch_one(&state.pool)
         .await?;
     Ok(ui::Ctx {
         viewer,
         host,
-        counts: ui::NavCounts { users, pending_requests, services, pending_services },
+        counts: ui::NavCounts { users, pending_requests, services, pending_services, routes },
     })
 }
 
@@ -97,11 +100,11 @@ fn back_to(next: Option<&str>, fallback: &str) -> Redirect {
     Redirect::to(&ui::next_or(next, fallback))
 }
 
-/// Settings that, when missing, break proxy mode in ways whose symptoms point
-/// nowhere near the cause. Shown on the overview, the settings page and any
-/// proxied service.
+/// Settings that, when missing, break gated routes in ways whose symptoms
+/// point nowhere near the cause. Shown on the overview, the settings page, the
+/// routes pages and any service that gates a route.
 pub(crate) struct ProxyHealth {
-    pub any_proxy: bool,
+    pub any_gated: bool,
     pub cookie_domain: Option<String>,
     pub origin_pinned: bool,
 }
@@ -109,13 +112,12 @@ pub(crate) struct ProxyHealth {
 impl ProxyHealth {
     async fn load(state: &AppState) -> AppResult<ProxyHealth> {
         let (n,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM services
-             WHERE deleted_at IS NULL AND status = 'approved' AND mode = 'proxy'",
+            "SELECT COUNT(*) FROM routes WHERE enabled = 1 AND service_id IS NOT NULL",
         )
         .fetch_one(&state.pool)
         .await?;
         Ok(ProxyHealth {
-            any_proxy: n > 0,
+            any_gated: n > 0,
             cookie_domain: crate::settings::cookie_domain(&state.pool).await,
             origin_pinned: state.origin.is_some(),
         })
@@ -124,19 +126,19 @@ impl ProxyHealth {
     fn notices(&self) -> maud::Markup {
         use ui::{notice, Tone};
         maud::html! {
-            @if self.any_proxy && self.cookie_domain.is_none() {
+            @if self.any_gated && self.cookie_domain.is_none() {
                 (notice(Tone::Warn, maud::html! {
                     strong { "Session cookie domain isn't set." }
-                    " Proxy-mode services are configured, but sessions are host-only, so the "
+                    " Some routes are gated, but sessions are host-only, so the "
                     "gated hosts never see them and every request looks signed out. "
                     a href="/admin/settings" { "Set it in Settings" } "."
                 }))
             }
-            @if self.any_proxy && !self.origin_pinned {
+            @if self.any_gated && !self.origin_pinned {
                 (notice(Tone::Warn, maud::html! {
                     strong { "ORIGIN isn't set." }
                     " Login redirects are guessed from the request's Host header, which on a "
-                    "proxied request is the app's hostname, not bastion's. Pin it in the environment."
+                    "gated request is the app's hostname, not bastion's. Pin it in the environment."
                 }))
             }
         }
