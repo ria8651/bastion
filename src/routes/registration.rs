@@ -86,8 +86,8 @@ pub async fn register(
         validate_perm_key(&p.key).map_err(AppError::BadRequest)?;
     }
 
-    let existing: Option<(i64, String, Option<String>)> = sqlx::query_as(
-        "SELECT id, status, public_jwk FROM services
+    let existing: Option<(i64, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT id, status, public_jwk, return_url FROM services
          WHERE slug = ? AND deleted_at IS NULL",
     )
     .bind(&slug)
@@ -109,9 +109,22 @@ pub async fn register(
             .await?;
             (row.0, "pending".to_string(), StatusCode::ACCEPTED)
         }
-        Some((id, status, stored_jwk_opt)) => {
+        Some((id, status, stored_jwk_opt, return_url)) => {
             if status == "denied" {
                 return Err(AppError::Forbidden);
+            }
+            // A keyless service with no return URL is one an admin made to
+            // gate routes. Nothing legitimate registers against it — there's
+            // no token for it to verify — so the first caller to try would
+            // just be claiming its slug: binding their key, renaming it,
+            // writing its permission catalog. The slug isn't secret either;
+            // the gate's login redirect carries it. A keyless service *with*
+            // a return URL is the setup-wizard flow, where the app binds its
+            // key on first boot, and stays as it was.
+            if stored_jwk_opt.is_none() && return_url.trim().is_empty() {
+                return Err(AppError::BadRequest(
+                    "this service is managed in bastion's admin and can't be registered".into(),
+                ));
             }
             let stored_kid = stored_jwk_opt
                 .as_deref()

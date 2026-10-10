@@ -7,8 +7,11 @@
 //! to decide how much of the request's own story to believe.
 
 use std::convert::Infallible;
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::{
@@ -18,10 +21,12 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
     Router,
 };
-use hyper::body::Incoming;
+use hyper::body::{Bytes, Frame, Incoming, SizeHint};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::time::{Instant, Sleep};
 use tower::ServiceExt;
 
 use crate::forwarded::ConnMeta;
@@ -32,7 +37,35 @@ use crate::state::AppState;
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn serve_conn<I>(io: I, peer: SocketAddr, meta: ConnMeta, app: Router)
+/// How long a request body may go without sending anything. A slow upload is
+/// fine; one that stops is holding a connection here and another to the
+/// upstream for nothing.
+const BODY_STALL_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Open connections across every listener, counting pending TLS handshakes
+/// and upgraded (WebSocket) connections. Each proxied one costs two
+/// descriptors, so this stays well inside a typical 4096 limit; past it,
+/// accepting pauses and new clients wait in the kernel's backlog rather than
+/// pushing the process into EMFILE, where every host fails at once.
+const MAX_CONNECTIONS: usize = 1500;
+
+/// One per open connection; dropped when it closes. Cloned into requests so
+/// `proxy::forward` can hold it for the life of an upgraded connection, which
+/// outlives hyper's own connection future.
+#[derive(Clone)]
+pub struct ConnPermit(#[allow(dead_code)] Arc<OwnedSemaphorePermit>);
+
+/// Shared by every listener, so the cap is on the process, not per port.
+#[derive(Clone)]
+pub struct Limits(Arc<Semaphore>);
+
+impl Default for Limits {
+    fn default() -> Limits {
+        Limits(Arc::new(Semaphore::new(MAX_CONNECTIONS)))
+    }
+}
+
+fn serve_conn<I>(io: I, peer: SocketAddr, meta: ConnMeta, permit: ConnPermit, app: Router)
 where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -40,8 +73,10 @@ where
         let svc = hyper::service::service_fn(move |mut req: Request<Incoming>| {
             req.extensions_mut().insert(ConnectInfo(peer));
             req.extensions_mut().insert(meta);
+            req.extensions_mut().insert(permit.clone());
             let app = app.clone();
-            async move { Ok::<_, Infallible>(app.oneshot(req.map(Body::new)).await.into_response()) }
+            let req = req.map(|b| Body::new(StallTimeout::new(b, BODY_STALL_TIMEOUT)));
+            async move { Ok::<_, Infallible>(app.oneshot(req).await.into_response()) }
         });
         let conn = hyper::server::conn::http1::Builder::new()
             .timer(TokioTimer::new())
@@ -56,15 +91,23 @@ where
     });
 }
 
+/// Waits for room under [`MAX_CONNECTIONS`], then for a connection.
+///
 /// Accept errors are mostly transient — out of descriptors under load, a
 /// connection reset before accept returned. Back off briefly instead of
 /// taking the listener, and with it every host, down.
-async fn accept(listener: &TcpListener) -> (tokio::net::TcpStream, SocketAddr) {
+async fn accept(listener: &TcpListener, limits: &Limits) -> (tokio::net::TcpStream, SocketAddr, ConnPermit) {
+    let permit = limits
+        .0
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("the connection semaphore is never closed");
     loop {
         match listener.accept().await {
             Ok((s, peer)) => {
                 let _ = s.set_nodelay(true);
-                return (s, peer);
+                return (s, peer, ConnPermit(Arc::new(permit)));
             }
             Err(e) => {
                 tracing::warn!(error = %e, "accept failed");
@@ -74,24 +117,24 @@ async fn accept(listener: &TcpListener) -> (tokio::net::TcpStream, SocketAddr) {
     }
 }
 
-pub async fn plain(listener: TcpListener, app: Router) {
+pub async fn plain(listener: TcpListener, limits: Limits, app: Router) {
     loop {
-        let (stream, peer) = accept(&listener).await;
-        serve_conn(stream, peer, ConnMeta { tls: false }, app.clone());
+        let (stream, peer, permit) = accept(&listener, &limits).await;
+        serve_conn(stream, peer, ConnMeta { tls: false }, permit, app.clone());
     }
 }
 
-pub async fn tls(listener: TcpListener, config: Arc<rustls::ServerConfig>, app: Router) {
+pub async fn tls(listener: TcpListener, limits: Limits, config: Arc<rustls::ServerConfig>, app: Router) {
     let acceptor = tokio_rustls::TlsAcceptor::from(config);
     loop {
-        let (stream, peer) = accept(&listener).await;
+        let (stream, peer, permit) = accept(&listener, &limits).await;
         let acceptor = acceptor.clone();
         let app = app.clone();
         // The handshake runs off the accept loop, so one slow client can't
         // stall everyone else's.
         tokio::spawn(async move {
             match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
-                Ok(Ok(tls)) => serve_conn(tls, peer, ConnMeta { tls: true }, app),
+                Ok(Ok(tls)) => serve_conn(tls, peer, ConnMeta { tls: true }, permit, app),
                 Ok(Err(e)) => tracing::debug!(error = %e, %peer, "TLS handshake failed"),
                 Err(_) => tracing::debug!(%peer, "TLS handshake timed out"),
             }
@@ -131,4 +174,59 @@ async fn redirect_to_https(state: &AppState, https_port: u16, req: Request) -> R
     let pq = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
     // 308 rather than 301 so a POST stays a POST.
     Redirect::permanent(&format!("https://{}{}", authority, pq)).into_response()
+}
+
+/// A request body that fails once it has gone [`BODY_STALL_TIMEOUT`] without
+/// a frame.
+///
+/// The clock only runs while someone is waiting on the body: it restarts at
+/// the first poll after each frame. Time the handler spends not reading —
+/// an upstream applying backpressure to a large upload, say — never counts
+/// against the client.
+struct StallTimeout {
+    inner: Incoming,
+    after: Duration,
+    sleep: Pin<Box<Sleep>>,
+    waiting: bool,
+}
+
+impl StallTimeout {
+    fn new(inner: Incoming, after: Duration) -> StallTimeout {
+        StallTimeout { inner, after, sleep: Box::pin(tokio::time::sleep(after)), waiting: false }
+    }
+}
+
+impl hyper::body::Body for StallTimeout {
+    type Data = Bytes;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
+        let this = &mut *self;
+        if !this.waiting {
+            this.waiting = true;
+            let deadline = Instant::now() + this.after;
+            this.sleep.as_mut().reset(deadline);
+        }
+        match Pin::new(&mut this.inner).poll_frame(cx) {
+            Poll::Ready(frame) => {
+                this.waiting = false;
+                Poll::Ready(frame.map(|f| f.map_err(Into::into)))
+            }
+            Poll::Pending => match this.sleep.as_mut().poll(cx) {
+                Poll::Ready(()) => Poll::Ready(Some(Err("request body stalled".into()))),
+                Poll::Pending => Poll::Pending,
+            },
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
 }

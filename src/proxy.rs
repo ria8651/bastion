@@ -436,6 +436,13 @@ pub async fn proxy_gate(
         return next.run(req).await;
     };
 
+    // Before anything is decided on that host: a request naming two of them
+    // is answered with neither. See `names_two_hosts`.
+    if names_two_hosts(&req) {
+        tracing::warn!(%host, "request line and Host header name different hosts");
+        return (StatusCode::BAD_REQUEST, "request names two different hosts").into_response();
+    }
+
     // bastion's own name first, so a wildcard route that happens to cover it
     // can't take over the admin UI.
     if is_own_host(&state, &host) {
@@ -505,15 +512,29 @@ pub async fn proxy_gate(
     // Without one the browser would be sent to log in, come back with nothing,
     // and be sent to log in again, forever — and that is the state a route is
     // in the moment it is first gated. Say so instead.
-    if crate::settings::cookie_domain(&state.pool).await.is_none() {
-        tracing::error!(
-            via = %hop.label,
-            "gated route with no cookie_domain — sessions cannot reach this host"
-        );
-        return misconfigured(
-            "No session cookie domain is set, so sign-in cannot carry across to \
-             this hostname. An admin needs to set one in bastion's settings.",
-        );
+    // A domain that doesn't cover this host loops the same way, since the
+    // browser never sends the cookie here — and `login_page` would bounce a
+    // signed-in user straight back, forever.
+    match crate::settings::cookie_domain(&state.pool).await {
+        None => {
+            tracing::error!(
+                via = %hop.label,
+                "gated route with no cookie_domain — sessions cannot reach this host"
+            );
+            return misconfigured(
+                "No session cookie domain is set, so sign-in cannot carry across to \
+                 this hostname. An admin needs to set one in bastion's settings.",
+            );
+        }
+        Some(domain) if !crate::host::covers(domain.trim_start_matches('.'), &hop.host) => {
+            tracing::error!(via = %hop.label, host = %hop.host, %domain, "gated host outside the cookie domain");
+            return misconfigured(&format!(
+                "This hostname isn't under bastion's session cookie domain ({}), so \
+                 sign-in cannot carry across to it. Gate only hostnames under that domain.",
+                domain
+            ));
+        }
+        Some(_) => {}
     }
 
     // ── who is this? ──
@@ -712,6 +733,7 @@ async fn forward(
     };
 
     let upgrade = req.headers().get(header::UPGRADE).cloned();
+    let conn_permit = req.extensions().get::<crate::serve::ConnPermit>().cloned();
     let method = req.method().clone();
     let path = req.uri().path().to_string();
 
@@ -743,6 +765,14 @@ async fn forward(
             if let Ok(v) = HeaderValue::from_str(&kept) {
                 h.append(header::COOKIE, v);
             }
+        }
+        // The upstream is told the host the route was chosen by, not whatever
+        // the client put in `Host`. An absolute-form request line
+        // (`GET http://open.example.com/ HTTP/1.1`) is matched on its own
+        // authority; `names_two_hosts` refuses one that disagrees with `Host`,
+        // and this makes sure the two can never drift apart downstream.
+        if let Some(a) = request_authority(&req) {
+            set(h, "host", &a);
         }
         set(h, "x-forwarded-host", &authority);
         set(h, "x-forwarded-proto", &scheme);
@@ -795,13 +825,19 @@ async fn forward(
         via = %hop.label,
     );
 
+    drop_bastion_set_cookies(res.headers_mut());
+
     // A 101 means both sides want to switch protocols; splice the two
     // connections together once each has finished upgrading. Protocol-agnostic,
     // so WebSockets and anything else built on Upgrade both work.
     if res.status() == StatusCode::SWITCHING_PROTOCOLS {
         let upstream_upgrade = hyper::upgrade::on(&mut res);
         let via = hop.label.clone();
+        // hyper's connection future ends at the upgrade, but the socket lives
+        // on in this task, so it keeps counting against the connection cap.
+        let permit = conn_permit;
         tokio::spawn(async move {
+            let _permit = permit;
             match tokio::try_join!(client_upgrade, upstream_upgrade) {
                 Ok((downstream, upstream)) => {
                     let mut a = TokioIo::new(downstream);
@@ -830,6 +866,51 @@ async fn forward(
     rewrite_location(&mut parts.headers, &hop.upstream, &scheme, &authority);
 
     Response::from_parts(parts, Body::new(body))
+}
+
+/// Remove any `Set-Cookie` an upstream sends for bastion's own cookie names.
+///
+/// The mirror of `strip_bastion_cookies`. Every app under the cookie domain —
+/// open routes included — can otherwise set `bastion_session` with
+/// `Domain=<parent>` and overwrite the real one: signing the victim into the
+/// attacker's account, or just logging them out of everything.
+fn drop_bastion_set_cookies(headers: &mut HeaderMap) {
+    let kept: Vec<HeaderValue> = headers
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter(|v| {
+            let name = v
+                .to_str()
+                .ok()
+                .and_then(|s| s.split(['=', ';']).next())
+                .map(str::trim)
+                .unwrap_or("");
+            name != crate::session::SESSION_COOKIE && name != crate::oauth::STATE_COOKIE
+        })
+        .cloned()
+        .collect();
+    headers.remove(header::SET_COOKIE);
+    for v in kept {
+        headers.append(header::SET_COOKIE, v);
+    }
+}
+
+/// Whether the request line and the `Host` header name different hosts.
+///
+/// Routing goes by the URI's authority when there is one — HTTP/2 carries the
+/// host nowhere else, and an absolute-form HTTP/1.1 request line overrides
+/// `Host` per RFC 9112 §3.2.2. A client that sends both, disagreeing, is
+/// trying to be routed by one name and served by the other: matched against
+/// an open route, then handed to an upstream that picks its site by `Host`,
+/// it would reach a gated app with no gate. Browsers never do this.
+fn names_two_hosts(req: &Request) -> bool {
+    let Some(uri_host) = req.uri().authority().map(|a| crate::host::bare(a.as_str())) else {
+        return false;
+    };
+    req.headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|h| crate::host::bare(h) != uri_host)
 }
 
 /// Rewrite a `Location` pointing at the upstream's own address back to the
@@ -1095,6 +1176,43 @@ mod tests {
         // strip happens later, in forward().
         assert!(is_identity_header(&HeaderName::from_static(LOOP_MARKER)));
         assert!(!is_hop_by_hop(&HeaderName::from_static(LOOP_MARKER)));
+    }
+
+    #[test]
+    fn a_request_naming_two_hosts_is_refused() {
+        // Routed by the request line, served by Host: the open-route bypass.
+        let smuggled = Request::builder()
+            .uri("http://open.example.com/admin")
+            .header("host", "gated.example.com")
+            .body(Body::empty())
+            .unwrap();
+        assert!(names_two_hosts(&smuggled));
+
+        // The same host in both, however written, is fine.
+        let same = Request::builder()
+            .uri("http://App.example.com:8443/x")
+            .header("host", "app.example.com.")
+            .body(Body::empty())
+            .unwrap();
+        assert!(!names_two_hosts(&same));
+        // The ordinary origin-form request has nothing to disagree with.
+        assert!(!names_two_hosts(&req(&[("host", "app.example.com")])));
+    }
+
+    #[test]
+    fn upstreams_cannot_set_bastions_cookies() {
+        let mut h = HeaderMap::new();
+        for c in [
+            "bastion_session=forged; Domain=.example.com; Path=/",
+            "app_sid=1; Path=/",
+            "bastion_oauth_state=x",
+            "theme=dark",
+        ] {
+            h.append(header::SET_COOKIE, HeaderValue::from_static(c));
+        }
+        drop_bastion_set_cookies(&mut h);
+        let left: Vec<_> = h.get_all(header::SET_COOKIE).iter().map(|v| v.to_str().unwrap()).collect();
+        assert_eq!(left, vec!["app_sid=1; Path=/", "theme=dark"]);
     }
 
     #[test]

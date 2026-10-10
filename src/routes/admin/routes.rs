@@ -385,6 +385,30 @@ async fn refuse_dead_gate(state: &AppState, service_id: Option<i64>) -> AppResul
     }
 }
 
+/// A gated hostname has to be under the session cookie domain, or the cookie
+/// never reaches it and sign-in loops. With no domain set at all the gate
+/// explains that itself, so there's nothing to check against yet.
+async fn refuse_uncovered_hosts(state: &AppState, hosts: &[String], service_id: Option<i64>) -> AppResult<()> {
+    if service_id.is_none() {
+        return Ok(());
+    }
+    let Some(domain) = crate::settings::cookie_domain(&state.pool).await else {
+        return Ok(());
+    };
+    let parent = domain.trim_start_matches('.');
+    for h in hosts {
+        let name = h.strip_prefix("*.").unwrap_or(h);
+        if !crate::host::covers(parent, name) {
+            return Err(AppError::BadRequest(format!(
+                "{} isn't under the session cookie domain ({}), so sign-in can't reach it. \
+                 Gate only hostnames under that domain, or leave this route open.",
+                h, domain
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Refuse a name another route already holds, or bastion's own.
 async fn refuse_claimed_hosts(state: &AppState, hosts: &[String], id: Option<i64>) -> AppResult<()> {
     let own = state.origin.as_deref().and_then(crate::host::of_url);
@@ -426,6 +450,7 @@ pub async fn add_route(
     let admin = admin(user)?;
     let v = validate(&f, &state.ports).map_err(AppError::BadRequest)?;
     let gate = refuse_dead_gate(&state, v.service_id).await?;
+    refuse_uncovered_hosts(&state, &v.hosts, v.service_id).await?;
     refuse_claimed_hosts(&state, &v.hosts, None).await?;
 
     let mut tx = state.pool.begin().await?;
@@ -464,6 +489,7 @@ pub async fn update_route(
     let id = f.id.ok_or_else(|| AppError::BadRequest("missing route id".into()))?;
     let v = validate(&f, &state.ports).map_err(AppError::BadRequest)?;
     let gate = refuse_dead_gate(&state, v.service_id).await?;
+    refuse_uncovered_hosts(&state, &v.hosts, v.service_id).await?;
     refuse_claimed_hosts(&state, &v.hosts, Some(id)).await?;
 
     let mut tx = state.pool.begin().await?;

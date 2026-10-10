@@ -32,7 +32,7 @@ Open <http://localhost:5180> → complete the setup wizard (OAuth creds → clai
 | `TLS_CERT`, `TLS_KEY` | (unset) | PEM certificate chain and key. Setting both makes bastion the edge: TLS on `HTTPS_PORT`, a redirect on `HTTP_PORT`. Requires `ORIGIN`. Re-read within a minute when the files change. |
 | `HTTPS_PORT` | `443` | TLS listener, edge mode only |
 | `HTTP_PORT` | `80` | Redirects known hosts to https, edge mode only. `off` to disable. |
-| `TRUSTED_PROXIES` | loopback + private ranges | Comma-separated IPs/CIDRs whose `X-Forwarded-{For,Proto}` are believed, or `none` |
+| `TRUSTED_PROXIES` | `none` in edge mode, else loopback + private ranges | Comma-separated IPs/CIDRs whose `X-Forwarded-{For,Proto}` are believed, or `none` |
 | `RUST_LOG` | `info,sqlx=warn,tower_http=info` | Tracing filter |
 
 Everything else — OAuth credentials, services, the session cookie domain — lives in the database and is managed from `/setup` and `/admin`.
@@ -64,7 +64,7 @@ Either terminate TLS at nginx/Caddy and proxy to `127.0.0.1:5180` with `X-Forwar
 
 Set `TLS_CERT` + `TLS_KEY` (and publish 80 and 443) and bastion terminates TLS itself, routing every hostname from the database. **Routes** (`/admin/routes`) map hostnames — `media.example.com` or `*.apps.example.com` — to an upstream like `http://192.168.1.8:8096`, or an `https://` one, optionally accepting a self-signed certificate. A route is open, or gated by a service.
 
-bastion doesn't issue certificates. Point it at whatever certbot / your DNS-01 client / private CA writes, and it picks up renewals without a restart; a renewal that fails to parse keeps the old pair serving, and the settings page shows the expiry. A deploy restarts the edge, so connections drop.
+bastion doesn't issue certificates. Point it at whatever your DNS-01 client or private CA writes, and it picks up renewals without a restart. It holds port 80 and redirects everything, so HTTP-01 challenges (certbot webroot or standalone) can't be answered — renew with DNS-01; a renewal that fails to parse keeps the old pair serving, and the settings page shows the expiry. A deploy restarts the edge, so connections drop.
 
 ## Integrating a service
 

@@ -26,16 +26,24 @@ pub struct ConnMeta {
 #[derive(Debug, Clone)]
 pub struct Trusted(Vec<(IpAddr, u8)>);
 
-/// Loopback and private ranges: a gateway in front of bastion is on the same
-/// box or the same LAN. A LAN client can therefore choose the IP it is logged
-/// as, which is the usual homelab trade; set `TRUSTED_PROXIES=none` to refuse.
-const DEFAULT_TRUSTED: &str = "127.0.0.0/8, ::1/128, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7";
+/// Behind a gateway: loopback and private ranges, since that gateway is on the
+/// same box or the same LAN. A LAN client can therefore choose the IP it is
+/// logged as, which is the usual homelab trade.
+const BEHIND_GATEWAY: &str = "127.0.0.0/8, ::1/128, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7";
+
+/// As the edge, nothing sits in front, so nobody's forwarding headers count.
+/// The private-range default would be actively wrong there: Docker's userland
+/// proxy and rootless port forwarding make *every* connection arrive from a
+/// private address, so any internet client could pick the `X-Real-IP` an app
+/// like Jellyfin uses to decide who is "on the LAN".
+const AS_EDGE: &str = "none";
 
 impl Trusted {
-    /// From `TRUSTED_PROXIES`: comma-separated addresses or CIDRs, `none` for
-    /// nothing, unset for [`DEFAULT_TRUSTED`].
-    pub fn parse(raw: Option<&str>) -> Result<Trusted, String> {
-        let raw = raw.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(DEFAULT_TRUSTED);
+    /// From `TRUSTED_PROXIES`: comma-separated addresses or CIDRs, or `none`.
+    /// Unset, it depends on whether bastion is the edge.
+    pub fn parse(raw: Option<&str>, edge: bool) -> Result<Trusted, String> {
+        let default = if edge { AS_EDGE } else { BEHIND_GATEWAY };
+        let raw = raw.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(default);
         if raw.eq_ignore_ascii_case("none") {
             return Ok(Trusted(Vec::new()));
         }
@@ -191,7 +199,7 @@ mod tests {
 
     #[test]
     fn cidrs_parse_and_match() {
-        let t = Trusted::parse(Some("192.168.1.0/24, 10.0.0.1, ::1")).unwrap();
+        let t = Trusted::parse(Some("192.168.1.0/24, 10.0.0.1, ::1"), false).unwrap();
         assert!(t.contains(ip("192.168.1.42")));
         assert!(!t.contains(ip("192.168.2.1")));
         assert!(t.contains(ip("10.0.0.1")));
@@ -200,15 +208,18 @@ mod tests {
         // A v4 peer on a dual-stack socket arrives v4-mapped.
         assert!(t.contains(ip("::ffff:192.168.1.9")));
 
-        assert!(Trusted::parse(Some("none")).unwrap().0.is_empty());
-        assert!(Trusted::parse(None).unwrap().contains(ip("172.20.0.3")));
-        assert!(Trusted::parse(Some("192.168.1.0/33")).is_err());
-        assert!(Trusted::parse(Some("nope")).is_err());
+        assert!(Trusted::parse(Some("none"), false).unwrap().0.is_empty());
+        assert!(Trusted::parse(None, false).unwrap().contains(ip("172.20.0.3")));
+        // As the edge, nobody is in front, so nobody is believed by default.
+        assert!(!Trusted::parse(None, true).unwrap().contains(ip("172.20.0.3")));
+        assert!(Trusted::parse(Some("10.0.0.1"), true).unwrap().contains(ip("10.0.0.1")));
+        assert!(Trusted::parse(Some("192.168.1.0/33"), false).is_err());
+        assert!(Trusted::parse(Some("nope"), false).is_err());
     }
 
     #[test]
     fn an_untrusted_peer_cannot_choose_its_address_or_scheme() {
-        let t = Trusted::parse(Some("192.168.1.0/24")).unwrap();
+        let t = Trusted::parse(Some("192.168.1.0/24"), false).unwrap();
         let f = resolve(
             &t,
             ip("203.0.113.7"),
@@ -223,7 +234,7 @@ mod tests {
 
     #[test]
     fn behind_a_trusted_gateway_the_client_is_the_hop_before_it() {
-        let t = Trusted::parse(Some("192.168.1.0/24")).unwrap();
+        let t = Trusted::parse(Some("192.168.1.0/24"), false).unwrap();
         // nginx: X-Forwarded-For = <whatever the client sent>, <client>.
         let f = resolve(
             &t,
@@ -242,7 +253,7 @@ mod tests {
 
     #[test]
     fn our_own_tls_listener_knows_its_scheme() {
-        let t = Trusted::parse(Some("none")).unwrap();
+        let t = Trusted::parse(Some("none"), false).unwrap();
         let f = resolve(&t, ip("203.0.113.7"), &h(&[("x-forwarded-proto", "http")]), ConnMeta { tls: true });
         assert_eq!(f.proto, "https");
     }

@@ -48,9 +48,9 @@ async fn main() -> anyhow::Result<()> {
         std::env::var("DATABASE_PATH").unwrap_or_else(|_| "./data/bastion.db".to_string());
     let origin = std::env::var("ORIGIN").ok().filter(|s| !s.is_empty());
     let port = env_port("PORT", 5180)?;
-    let trusted = forwarded::Trusted::parse(env("TRUSTED_PROXIES").as_deref())
-        .map_err(anyhow::Error::msg)?;
     let edge = edge_config(origin.as_deref())?;
+    let trusted = forwarded::Trusted::parse(env("TRUSTED_PROXIES").as_deref(), edge.is_some())
+        .map_err(anyhow::Error::msg)?;
 
     tracing::info!(db = %database_path, "connecting to sqlite");
     let pool = db::connect(&database_path).await?;
@@ -194,15 +194,16 @@ async fn main() -> anyhow::Result<()> {
     // The plaintext port always runs. Behind a gateway it is the only one;
     // as the edge it is the LAN way in that doesn't depend on the certificate.
     let mut listeners = tokio::task::JoinSet::new();
-    listeners.spawn(serve::plain(bind(port, "http").await?, app.clone()));
+    let limits = serve::Limits::default();
+    listeners.spawn(serve::plain(bind(port, "http").await?, limits.clone(), app.clone()));
 
     if let Some(edge) = &edge {
         edge.certs.clone().spawn_reloader();
         let config = Arc::new(tls::server_config(edge.certs.clone())?);
-        listeners.spawn(serve::tls(bind(edge.https_port, "https").await?, config, app.clone()));
+        listeners.spawn(serve::tls(bind(edge.https_port, "https").await?, limits.clone(), config, app.clone()));
         if let Some(p) = edge.http_port {
             let redirect = serve::redirect_app(state.clone(), edge.https_port);
-            listeners.spawn(serve::plain(bind(p, "http → https redirect").await?, redirect));
+            listeners.spawn(serve::plain(bind(p, "http → https redirect").await?, limits.clone(), redirect));
         }
     }
 

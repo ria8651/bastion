@@ -32,27 +32,33 @@ fn candidates(host: &str) -> Vec<String> {
     out
 }
 
-/// The enabled route for a bare host, if any. Re-read per request, like
-/// everything else bastion routes on, so an edit applies to the next request.
+/// The route for a bare host, if any. Re-read per request, like everything
+/// else bastion routes on, so an edit applies to the next request.
+///
+/// The most specific pattern is chosen *before* looking at whether it's
+/// enabled, and a disabled winner means `None`. Filtering disabled routes out
+/// first would let a name fall through to a wider wildcard: disable gated
+/// `secret.example.com` and an open `*.example.com` would start serving it.
 pub async fn lookup(pool: &SqlitePool, host: &str) -> Result<Option<Route>, sqlx::Error> {
     let cands = candidates(host);
     let placeholders = vec!["?"; cands.len()].join(", ");
     // Exact before wildcard, then the longest — i.e. most specific — wildcard.
     let sql = format!(
-        "SELECT r.name, r.upstream_url, r.tls_skip_verify, r.service_id, r.public_paths
+        "SELECT r.name, r.upstream_url, r.tls_skip_verify, r.service_id, r.public_paths, r.enabled
          FROM route_hosts h JOIN routes r ON r.id = h.route_id
-         WHERE r.enabled = 1 AND h.host IN ({placeholders})
+         WHERE h.host IN ({placeholders})
          ORDER BY h.host LIKE '*.%', length(h.host) DESC
          LIMIT 1"
     );
     #[allow(clippy::type_complexity)]
-    let mut q = sqlx::query_as::<_, (String, String, bool, Option<i64>, Option<String>)>(&sql);
+    let mut q = sqlx::query_as::<_, (String, String, bool, Option<i64>, Option<String>, bool)>(&sql);
     for c in &cands {
         q = q.bind(c);
     }
     Ok(q.fetch_optional(pool)
         .await?
-        .map(|(name, upstream, skip_verify, service_id, public_paths)| Route {
+        .filter(|row| row.5)
+        .map(|(name, upstream, skip_verify, service_id, public_paths, _)| Route {
             name,
             upstream,
             skip_verify,
@@ -161,6 +167,32 @@ pub async fn host_owner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_disabled_route_does_not_fall_through_to_a_wider_wildcard() {
+        let dir = std::env::temp_dir().join(format!("bastion-edge-{}", std::process::id()));
+        let pool = crate::db::connect(dir.join("t.db").to_str().unwrap()).await.unwrap();
+        sqlx::query(
+            "INSERT INTO routes (id, name, upstream_url, enabled) VALUES
+               (1, 'secret', 'http://127.0.0.1:1', 0),
+               (2, 'everything', 'http://127.0.0.1:2', 1);
+             INSERT INTO route_hosts (host, route_id) VALUES
+               ('secret.example.com', 1), ('*.example.com', 2);",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Disabled means 404 — not "served by the next pattern that matches".
+        assert!(lookup(&pool, "secret.example.com").await.unwrap().is_none());
+        assert_eq!(lookup(&pool, "other.example.com").await.unwrap().unwrap().name, "everything");
+
+        sqlx::query("UPDATE routes SET enabled = 1 WHERE id = 1").execute(&pool).await.unwrap();
+        assert_eq!(lookup(&pool, "secret.example.com").await.unwrap().unwrap().name, "secret");
+
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn candidates_run_from_exact_to_widest() {
