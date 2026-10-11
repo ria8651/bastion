@@ -138,7 +138,11 @@ fn describe(leaf: &CertificateDer<'_>) -> Result<CertInfo> {
         })
         .unwrap_or_default();
     if names.is_empty() {
-        names.extend(cert.subject().iter_common_name().filter_map(|cn| cn.as_str().ok().map(String::from)));
+        names.extend(
+            cert.subject()
+                .iter_common_name()
+                .filter_map(|cn| cn.as_str().ok().map(String::from)),
+        );
     }
     Ok(CertInfo {
         names,

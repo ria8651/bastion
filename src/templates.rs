@@ -94,7 +94,11 @@ pub fn corner_meta(host: &str) -> Markup {
 /// Top horizontal strip: brand mark on the left, deployment meta on the right.
 /// Constrained to the same max-width as the page body so the edges align.
 pub fn page_chrome(crumb: Option<&str>, host: &str, narrow: bool) -> Markup {
-    let class = if narrow { "page-chrome narrow" } else { "page-chrome" };
+    let class = if narrow {
+        "page-chrome narrow"
+    } else {
+        "page-chrome"
+    };
     html! {
         div class=(class) {
             (corner_mark(crumb))
@@ -104,7 +108,11 @@ pub fn page_chrome(crumb: Option<&str>, host: &str, narrow: bool) -> Markup {
 }
 
 pub fn bottom_strip(extra: Option<&str>, narrow: bool) -> Markup {
-    let class = if narrow { "bottom-strip narrow" } else { "bottom-strip" };
+    let class = if narrow {
+        "bottom-strip narrow"
+    } else {
+        "bottom-strip"
+    };
     html! {
         div class=(class) {
             "ria8651/bastion"

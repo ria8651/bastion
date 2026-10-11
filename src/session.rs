@@ -176,8 +176,7 @@ pub fn set_session_cookie(
     c.set_http_only(true);
     c.set_same_site(SameSite::Lax);
     c.set_secure(secure);
-    if let Ok(t) =
-        tower_cookies::cookie::time::OffsetDateTime::from_unix_timestamp(expires_at_unix)
+    if let Ok(t) = tower_cookies::cookie::time::OffsetDateTime::from_unix_timestamp(expires_at_unix)
     {
         c.set_expires(t);
     }

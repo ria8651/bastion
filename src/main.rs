@@ -39,8 +39,9 @@ use crate::state::{AppState, Edge};
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,sqlx=warn,tower_http=info")),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new("info,sqlx=warn,tower_http=info")
+            }),
         )
         .init();
 
@@ -60,7 +61,10 @@ async fn main() -> anyhow::Result<()> {
         proxy: proxy::client(),
         trusted: Arc::new(trusted),
         ports: std::iter::once(port)
-            .chain(edge.iter().flat_map(|e| std::iter::once(e.https_port).chain(e.http_port)))
+            .chain(
+                edge.iter()
+                    .flat_map(|e| std::iter::once(e.https_port).chain(e.http_port)),
+            )
             .collect(),
         edge: edge.clone(),
     };
@@ -92,7 +96,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/setup/pending", get(routes::setup::pending_partial))
         .route("/setup/add-service", post(routes::setup::add_service))
         .route("/setup/remove-service", post(routes::setup::remove_service))
-        .route("/setup/approve-service", post(routes::setup::approve_service))
+        .route(
+            "/setup/approve-service",
+            post(routes::setup::approve_service),
+        )
         .route("/setup/deny-service", post(routes::setup::deny_service))
         .route("/setup/finish", post(routes::setup::finish))
         // account
@@ -181,8 +188,14 @@ async fn main() -> anyhow::Result<()> {
             axum::routing::put(routes::registration::put_permissions),
         )
         // middleware
-        .layer(axmw::from_fn_with_state(state.clone(), middleware::setup_gate))
-        .layer(axmw::from_fn_with_state(state.clone(), middleware::load_user))
+        .layer(axmw::from_fn_with_state(
+            state.clone(),
+            middleware::setup_gate,
+        ))
+        .layer(axmw::from_fn_with_state(
+            state.clone(),
+            middleware::load_user,
+        ))
         // Outside load_user and setup_gate — a gated host is not part of
         // bastion's UI and must not be redirected into the setup wizard — but
         // inside the cookie layer, since it reads the session itself.
@@ -195,15 +208,28 @@ async fn main() -> anyhow::Result<()> {
     // as the edge it is the LAN way in that doesn't depend on the certificate.
     let mut listeners = tokio::task::JoinSet::new();
     let limits = serve::Limits::default();
-    listeners.spawn(serve::plain(bind(port, "http").await?, limits.clone(), app.clone()));
+    listeners.spawn(serve::plain(
+        bind(port, "http").await?,
+        limits.clone(),
+        app.clone(),
+    ));
 
     if let Some(edge) = &edge {
         edge.certs.clone().spawn_reloader();
         let config = Arc::new(tls::server_config(edge.certs.clone())?);
-        listeners.spawn(serve::tls(bind(edge.https_port, "https").await?, limits.clone(), config, app.clone()));
+        listeners.spawn(serve::tls(
+            bind(edge.https_port, "https").await?,
+            limits.clone(),
+            config,
+            app.clone(),
+        ));
         if let Some(p) = edge.http_port {
             let redirect = serve::redirect_app(state.clone(), edge.https_port);
-            listeners.spawn(serve::plain(bind(p, "http → https redirect").await?, limits.clone(), redirect));
+            listeners.spawn(serve::plain(
+                bind(p, "http → https redirect").await?,
+                limits.clone(),
+                redirect,
+            ));
         }
     }
 
@@ -216,12 +242,17 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn env(key: &str) -> Option<String> {
-    std::env::var(key).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    std::env::var(key)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 fn env_port(key: &str, default: u16) -> anyhow::Result<u16> {
     match env(key) {
-        Some(s) => s.parse().with_context(|| format!("{} must be a port number, got {:?}", key, s)),
+        Some(s) => s
+            .parse()
+            .with_context(|| format!("{} must be a port number, got {:?}", key, s)),
         None => Ok(default),
     }
 }

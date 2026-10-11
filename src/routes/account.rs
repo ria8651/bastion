@@ -11,9 +11,7 @@ use tower_cookies::Cookies;
 use crate::audit::audit;
 use crate::error::{AppError, AppResult};
 use crate::models::UserCtx;
-use crate::oauth::{
-    build_authorize_url, generate_state, set_state_cookie, OAuthState, Provider,
-};
+use crate::oauth::{build_authorize_url, generate_state, set_state_cookie, OAuthState, Provider};
 use crate::setup::get_oauth_config;
 use crate::state::{is_secure, origin_from, AppState};
 use crate::templates::{
@@ -187,13 +185,12 @@ pub async fn link_post(
         })?;
 
     // Refuse if already linked to this user.
-    let already: Option<(i64,)> = sqlx::query_as(
-        "SELECT id FROM user_identities WHERE user_id = ? AND provider = ?",
-    )
-    .bind(user.id)
-    .bind(provider.as_str())
-    .fetch_optional(&state.pool)
-    .await?;
+    let already: Option<(i64,)> =
+        sqlx::query_as("SELECT id FROM user_identities WHERE user_id = ? AND provider = ?")
+            .bind(user.id)
+            .bind(provider.as_str())
+            .fetch_optional(&state.pool)
+            .await?;
     if already.is_some() {
         return Ok(Redirect::to("/account?already=1").into_response());
     }
@@ -231,12 +228,11 @@ pub async fn unlink_post(
         return Err(AppError::Unauthorized);
     };
 
-    let row: Option<(i64, String, String)> = sqlx::query_as(
-        "SELECT user_id, provider, provider_id FROM user_identities WHERE id = ?",
-    )
-    .bind(f.identity_id)
-    .fetch_optional(&state.pool)
-    .await?;
+    let row: Option<(i64, String, String)> =
+        sqlx::query_as("SELECT user_id, provider, provider_id FROM user_identities WHERE id = ?")
+            .bind(f.identity_id)
+            .fetch_optional(&state.pool)
+            .await?;
     let Some((uid, provider, provider_id)) = row else {
         return Err(AppError::NotFound);
     };

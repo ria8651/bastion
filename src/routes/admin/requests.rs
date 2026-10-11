@@ -48,8 +48,17 @@ pub async fn requests_page(
         where_clause
     );
     #[allow(clippy::type_complexity)]
-    let rows: Vec<(i64, i64, String, Option<String>, Option<String>, i64, Option<i64>, Option<String>, i64)> =
-        sqlx::query_as(&sql).fetch_all(&state.pool).await?;
+    let rows: Vec<(
+        i64,
+        i64,
+        String,
+        Option<String>,
+        Option<String>,
+        i64,
+        Option<i64>,
+        Option<String>,
+        i64,
+    )> = sqlx::query_as(&sql).fetch_all(&state.pool).await?;
 
     let (pending_n, granted_n, denied_n, all_n): (i64, i64, i64, i64) = sqlx::query_as(&format!(
         "SELECT
@@ -118,7 +127,9 @@ pub async fn requests_page(
             }
         }
     };
-    Ok(ctx.page(Nav::Requests, "Access requests", body).into_response())
+    Ok(ctx
+        .page(Nav::Requests, "Access requests", body)
+        .into_response())
 }
 
 fn seg(label: &str, n: i64, active: &str) -> Markup {
@@ -144,12 +155,11 @@ pub async fn approve_request(
 ) -> AppResult<Response> {
     let admin = admin(user)?;
 
-    let req: Option<(i64, Option<i64>, Option<i64>)> = sqlx::query_as(
-        "SELECT user_id, service_id, resolved_at FROM access_requests WHERE id = ?",
-    )
-    .bind(f.id)
-    .fetch_optional(&state.pool)
-    .await?;
+    let req: Option<(i64, Option<i64>, Option<i64>)> =
+        sqlx::query_as("SELECT user_id, service_id, resolved_at FROM access_requests WHERE id = ?")
+            .bind(f.id)
+            .fetch_optional(&state.pool)
+            .await?;
     let Some((uid, svc_id, resolved)) = req else {
         return Err(AppError::BadRequest("not found".into()));
     };
@@ -199,12 +209,11 @@ pub async fn deny_request(
 ) -> AppResult<Response> {
     let admin = admin(user)?;
 
-    let req: Option<(i64, Option<i64>, Option<i64>)> = sqlx::query_as(
-        "SELECT user_id, service_id, resolved_at FROM access_requests WHERE id = ?",
-    )
-    .bind(f.id)
-    .fetch_optional(&state.pool)
-    .await?;
+    let req: Option<(i64, Option<i64>, Option<i64>)> =
+        sqlx::query_as("SELECT user_id, service_id, resolved_at FROM access_requests WHERE id = ?")
+            .bind(f.id)
+            .fetch_optional(&state.pool)
+            .await?;
     let Some((uid, svc_id, resolved)) = req else {
         return Err(AppError::BadRequest("not found".into()));
     };

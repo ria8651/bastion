@@ -28,28 +28,30 @@ pub async fn overview_page(
     .fetch_all(&state.pool)
     .await?;
 
-    let requests: Vec<(i64, i64, String, Option<String>, Option<String>, i64)> = sqlx::query_as(&format!(
-        "SELECT r.id, u.id, u.username, u.avatar, s.slug, r.requested_at
+    let requests: Vec<(i64, i64, String, Option<String>, Option<String>, i64)> =
+        sqlx::query_as(&format!(
+            "SELECT r.id, u.id, u.username, u.avatar, s.slug, r.requested_at
          FROM access_requests r
          JOIN users u ON u.id = r.user_id
          LEFT JOIN services s ON s.id = r.service_id
          WHERE {OPEN_REQUEST}
          ORDER BY r.requested_at DESC LIMIT 20",
-    ))
-    .fetch_all(&state.pool)
-    .await?;
+        ))
+        .fetch_all(&state.pool)
+        .await?;
 
     // Pending accounts that aren't already represented by an open request
     // above, so nobody shows up twice.
-    let pending_users: Vec<(i64, String, Option<String>, Option<String>, i64)> = sqlx::query_as(&format!(
-        "SELECT u.id, u.username, u.avatar, u.email, u.created_at FROM users u
+    let pending_users: Vec<(i64, String, Option<String>, Option<String>, i64)> =
+        sqlx::query_as(&format!(
+            "SELECT u.id, u.username, u.avatar, u.email, u.created_at FROM users u
          WHERE u.status = 'pending'
            AND NOT EXISTS (SELECT 1 FROM access_requests r
                            WHERE r.user_id = u.id AND {OPEN_REQUEST})
          ORDER BY u.created_at DESC",
-    ))
-    .fetch_all(&state.pool)
-    .await?;
+        ))
+        .fetch_all(&state.pool)
+        .await?;
 
     let (sessions, active_7d): (i64, i64) = sqlx::query_as(
         "SELECT
@@ -62,7 +64,8 @@ pub async fn overview_page(
     let health = ProxyHealth::load(&state).await?;
     let recent = super::audit::load_events(&state, 8).await?;
     let more_requests = ctx.counts.pending_requests as usize > requests.len();
-    let nothing_waiting = pending_services.is_empty() && requests.is_empty() && pending_users.is_empty();
+    let nothing_waiting =
+        pending_services.is_empty() && requests.is_empty() && pending_users.is_empty();
 
     let body = html! {
         (header(None, "Overview", Some(html! { (ctx.host) }), None))

@@ -115,8 +115,8 @@ pub async fn verify_service_jwt(
     let verifier = RS256
         .verifier_from_jwk(&jwk)
         .map_err(|e| AppError::Other(anyhow!("build verifier: {}", e)))?;
-    let (payload, _) = jwt::decode_with_verifier(&token, &verifier)
-        .map_err(|_| AppError::Unauthorized)?;
+    let (payload, _) =
+        jwt::decode_with_verifier(&token, &verifier).map_err(|_| AppError::Unauthorized)?;
 
     match payload.issuer() {
         Some(iss) if iss == slug => {}
@@ -124,7 +124,7 @@ pub async fn verify_service_jwt(
     }
     let aud_ok = payload
         .audience()
-        .map(|auds| auds.iter().any(|a| *a == expected_aud))
+        .map(|auds| auds.contains(&expected_aud))
         .unwrap_or(false);
     if !aud_ok {
         return Err(AppError::Unauthorized);

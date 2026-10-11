@@ -160,7 +160,12 @@ pub fn back(href: &str, label: &str) -> Markup {
 /// Page title row. `lead` sits left of the title (an avatar or tile on detail
 /// pages); `sub` is the mono line under it; `actions` floats right and wraps
 /// beneath on narrow screens.
-pub fn header(lead: Option<Markup>, title: &str, sub: Option<Markup>, actions: Option<Markup>) -> Markup {
+pub fn header(
+    lead: Option<Markup>,
+    title: &str,
+    sub: Option<Markup>,
+    actions: Option<Markup>,
+) -> Markup {
     html! {
         div.ph {
             div.lead {
@@ -300,7 +305,14 @@ pub struct Post<'a> {
 
 impl<'a> Post<'a> {
     pub fn new(action: &'a str, label: &'a str) -> Self {
-        Post { action, fields: &[], label, class: "btn sm", confirm: None, stay: false }
+        Post {
+            action,
+            fields: &[],
+            label,
+            class: "btn sm",
+            confirm: None,
+            stay: false,
+        }
     }
     pub fn fields(mut self, f: &'a [(&'a str, &'a str)]) -> Self {
         self.fields = f;
@@ -350,7 +362,9 @@ pub fn switch(action: &str, fields: &[(&str, &str)], on: bool, label: &str) -> M
 /// Only local admin paths: anything else is an open redirect.
 pub fn next_or(next: Option<&str>, fallback: &str) -> String {
     match next {
-        Some(n) if n.starts_with("/admin") && !n.contains("//") && !n.contains('\\') => n.to_string(),
+        Some(n) if n.starts_with("/admin") && !n.contains("//") && !n.contains('\\') => {
+            n.to_string()
+        }
         _ => fallback.to_string(),
     }
 }

@@ -51,20 +51,20 @@ pub async fn lookup(pool: &SqlitePool, host: &str) -> Result<Option<Route>, sqlx
          LIMIT 1"
     );
     #[allow(clippy::type_complexity)]
-    let mut q = sqlx::query_as::<_, (String, String, bool, Option<i64>, Option<String>, bool)>(&sql);
+    let mut q =
+        sqlx::query_as::<_, (String, String, bool, Option<i64>, Option<String>, bool)>(&sql);
     for c in &cands {
         q = q.bind(c);
     }
-    Ok(q.fetch_optional(pool)
-        .await?
-        .filter(|row| row.5)
-        .map(|(name, upstream, skip_verify, service_id, public_paths, _)| Route {
+    Ok(q.fetch_optional(pool).await?.filter(|row| row.5).map(
+        |(name, upstream, skip_verify, service_id, public_paths, _)| Route {
             name,
             upstream,
             skip_verify,
             service_id,
             public_paths,
-        }))
+        },
+    ))
 }
 
 /// Whether a host pattern covers `host`.
@@ -114,7 +114,11 @@ pub fn parse_hosts(raw: &str) -> Result<Vec<String>, String> {
 /// everything else on it — `http://media.example.com:8096` is the app next
 /// door, not bastion. It's a loop only on one of bastion's own ports, or on
 /// 80/443, where a gateway in front would hand it straight back.
-pub fn validate_upstream(raw: &str, served: &[String], own_ports: &[u16]) -> Result<String, String> {
+pub fn validate_upstream(
+    raw: &str,
+    served: &[String],
+    own_ports: &[u16],
+) -> Result<String, String> {
     let u = raw.trim().to_string();
     if u.is_empty() {
         return Err("upstream URL required".into());
@@ -171,7 +175,9 @@ mod tests {
     #[tokio::test]
     async fn a_disabled_route_does_not_fall_through_to_a_wider_wildcard() {
         let dir = std::env::temp_dir().join(format!("bastion-edge-{}", std::process::id()));
-        let pool = crate::db::connect(dir.join("t.db").to_str().unwrap()).await.unwrap();
+        let pool = crate::db::connect(dir.join("t.db").to_str().unwrap())
+            .await
+            .unwrap();
         sqlx::query(
             "INSERT INTO routes (id, name, upstream_url, enabled) VALUES
                (1, 'secret', 'http://127.0.0.1:1', 0),
@@ -185,10 +191,27 @@ mod tests {
 
         // Disabled means 404 — not "served by the next pattern that matches".
         assert!(lookup(&pool, "secret.example.com").await.unwrap().is_none());
-        assert_eq!(lookup(&pool, "other.example.com").await.unwrap().unwrap().name, "everything");
+        assert_eq!(
+            lookup(&pool, "other.example.com")
+                .await
+                .unwrap()
+                .unwrap()
+                .name,
+            "everything"
+        );
 
-        sqlx::query("UPDATE routes SET enabled = 1 WHERE id = 1").execute(&pool).await.unwrap();
-        assert_eq!(lookup(&pool, "secret.example.com").await.unwrap().unwrap().name, "secret");
+        sqlx::query("UPDATE routes SET enabled = 1 WHERE id = 1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            lookup(&pool, "secret.example.com")
+                .await
+                .unwrap()
+                .unwrap()
+                .name,
+            "secret"
+        );
 
         pool.close().await;
         let _ = std::fs::remove_dir_all(dir);
@@ -213,7 +236,8 @@ mod tests {
     #[test]
     fn hosts_parse_normalised_and_deduped() {
         assert_eq!(
-            parse_hosts("Misc.Example.com\nmac.example.com, misc.example.com.\n\n*.Apps.Bink").unwrap(),
+            parse_hosts("Misc.Example.com\nmac.example.com, misc.example.com.\n\n*.Apps.Bink")
+                .unwrap(),
             vec!["misc.example.com", "mac.example.com", "*.apps.bink"]
         );
         assert!(parse_hosts("").is_err());

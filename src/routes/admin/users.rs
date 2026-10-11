@@ -30,9 +30,18 @@ pub async fn users_page(
     let ctx = ctx(&state, &headers, user).await?;
 
     #[allow(clippy::type_complexity)]
-    let rows: Vec<(i64, Option<String>, String, Option<String>, String, bool, Option<i64>, i64, Option<String>)> =
-        sqlx::query_as(
-            "SELECT u.id, u.avatar, u.username, u.email, u.status, u.is_admin, u.last_login_at,
+    let rows: Vec<(
+        i64,
+        Option<String>,
+        String,
+        Option<String>,
+        String,
+        bool,
+        Option<i64>,
+        i64,
+        Option<String>,
+    )> = sqlx::query_as(
+        "SELECT u.id, u.avatar, u.username, u.email, u.status, u.is_admin, u.last_login_at,
                     (SELECT COUNT(*) FROM grants g
                        JOIN services s ON s.id = g.service_id AND s.deleted_at IS NULL
                       WHERE g.user_id = u.id) AS svc_count,
@@ -40,9 +49,9 @@ pub async fn users_page(
                        FROM user_identities ui WHERE ui.user_id = u.id) AS providers
              FROM users u
              ORDER BY u.status = 'pending' DESC, u.last_login_at IS NULL, u.last_login_at DESC",
-        )
-        .fetch_all(&state.pool)
-        .await?;
+    )
+    .fetch_all(&state.pool)
+    .await?;
 
     let pending = rows.iter().filter(|r| r.4 == "pending").count();
     let body = html! {
@@ -98,15 +107,24 @@ pub async fn user_detail(
     let ctx = ctx(&state, &headers, user).await?;
 
     #[allow(clippy::type_complexity)]
-    let u: Option<(String, Option<String>, Option<String>, String, bool, i64, Option<i64>, String, String)> =
-        sqlx::query_as(
-            "SELECT username, email, avatar, status, is_admin, created_at, last_login_at,
+    let u: Option<(
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        bool,
+        i64,
+        Option<i64>,
+        String,
+        String,
+    )> = sqlx::query_as(
+        "SELECT username, email, avatar, status, is_admin, created_at, last_login_at,
                     sub_anchor_provider, sub_anchor_provider_id
              FROM users WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await?;
+    )
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await?;
     let Some((uname, email, avatar_url, status, is_admin, created, last, anchor_p, anchor_id)) = u
     else {
         return Err(AppError::NotFound);
@@ -148,7 +166,13 @@ pub async fn user_detail(
     .await?;
     let mut perms: HashMap<i64, Vec<Perm>> = HashMap::new();
     for (sid, pid, key, description, held, default_allow) in perm_rows {
-        perms.entry(sid).or_default().push(Perm { id: pid, key, description, held, default_allow });
+        perms.entry(sid).or_default().push(Perm {
+            id: pid,
+            key,
+            description,
+            held,
+            default_allow,
+        });
     }
 
     let requests: Vec<(Option<String>, Option<String>, i64, Option<i64>)> = sqlx::query_as(
@@ -573,7 +597,11 @@ pub async fn toggle_perm(
     audit(
         &state.pool,
         Some(admin.id),
-        if f.grant == 1 { "perm.grant" } else { "perm.revoke" },
+        if f.grant == 1 {
+            "perm.grant"
+        } else {
+            "perm.revoke"
+        },
         Some(&format!("user:{}", uid)),
         Some(serde_json::json!({
             "serviceId": service_id,

@@ -193,12 +193,11 @@ pub async fn status(
     State(state): State<AppState>,
     Path(slug): Path<String>,
 ) -> AppResult<Response> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT status FROM services WHERE slug = ? AND deleted_at IS NULL",
-    )
-    .bind(&slug)
-    .fetch_optional(&state.pool)
-    .await?;
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT status FROM services WHERE slug = ? AND deleted_at IS NULL")
+            .bind(&slug)
+            .fetch_optional(&state.pool)
+            .await?;
     let status = row.map(|(s,)| s).ok_or(AppError::NotFound)?;
     Ok(Json(json!({ "status": status })).into_response())
 }
@@ -398,11 +397,10 @@ fn validate_perm_key(key: &str) -> Result<(), String> {
     if k.is_empty() {
         return Err("permission key required".into());
     }
-    if !k.chars().all(|c| {
-        c.is_ascii_lowercase()
-            || c.is_ascii_digit()
-            || matches!(c, ':' | '-' | '_' | '.')
-    }) {
+    if !k
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, ':' | '-' | '_' | '.'))
+    {
         return Err(format!(
             "invalid permission key '{}': only lowercase, digits, : - _ .",
             k
@@ -419,4 +417,3 @@ pub fn jwk_thumbprint(jwk_str: &str) -> String {
     let digest = h.finalize();
     hex::encode(&digest[..8])
 }
-

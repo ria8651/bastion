@@ -96,13 +96,14 @@ pub fn normalize_cookie_domain(raw: &str, bastion_host: Option<&str>) -> Result<
                  domain it sits under.",
                 host,
                 s,
-                host.split_once('.').map(|(_, parent)| parent).unwrap_or(&host)
+                host.split_once('.')
+                    .map(|(_, parent)| parent)
+                    .unwrap_or(&host)
             ));
         }
     }
     Ok(format!(".{}", s))
 }
-
 
 /// Common multi-label public suffixes.
 ///
@@ -117,16 +118,55 @@ pub fn normalize_cookie_domain(raw: &str, bastion_host: Option<&str>) -> Result<
 /// `contains('.')` check above.
 fn is_public_suffix(domain: &str) -> bool {
     const SUFFIXES: &[&str] = &[
-        "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "net.uk", "sch.uk",
-        "com.au", "net.au", "org.au", "edu.au", "gov.au", "id.au",
-        "co.nz", "net.nz", "org.nz", "govt.nz", "ac.nz",
-        "co.za", "org.za", "co.jp", "or.jp", "ne.jp", "ac.jp", "go.jp",
-        "com.br", "com.cn", "com.mx", "com.sg", "com.tr", "co.in", "co.kr",
-        "co.il", "com.ar", "com.tw", "com.hk", "com.pl", "com.ua",
-        "github.io", "gitlab.io", "pages.dev", "workers.dev", "vercel.app",
-        "netlify.app", "herokuapp.com", "azurewebsites.net", "cloudfront.net",
+        "co.uk",
+        "org.uk",
+        "ac.uk",
+        "gov.uk",
+        "me.uk",
+        "net.uk",
+        "sch.uk",
+        "com.au",
+        "net.au",
+        "org.au",
+        "edu.au",
+        "gov.au",
+        "id.au",
+        "co.nz",
+        "net.nz",
+        "org.nz",
+        "govt.nz",
+        "ac.nz",
+        "co.za",
+        "org.za",
+        "co.jp",
+        "or.jp",
+        "ne.jp",
+        "ac.jp",
+        "go.jp",
+        "com.br",
+        "com.cn",
+        "com.mx",
+        "com.sg",
+        "com.tr",
+        "co.in",
+        "co.kr",
+        "co.il",
+        "com.ar",
+        "com.tw",
+        "com.hk",
+        "com.pl",
+        "com.ua",
+        "github.io",
+        "gitlab.io",
+        "pages.dev",
+        "workers.dev",
+        "vercel.app",
+        "netlify.app",
+        "herokuapp.com",
+        "azurewebsites.net",
+        "cloudfront.net",
     ];
-    SUFFIXES.iter().any(|s| *s == domain)
+    SUFFIXES.contains(&domain)
 }
 
 #[cfg(test)]
@@ -160,8 +200,14 @@ mod tests {
 
     #[test]
     fn cookie_domain_normalizes() {
-        assert_eq!(normalize_cookie_domain("example.com").unwrap(), ".example.com");
-        assert_eq!(normalize_cookie_domain(".example.com").unwrap(), ".example.com");
+        assert_eq!(
+            normalize_cookie_domain("example.com").unwrap(),
+            ".example.com"
+        );
+        assert_eq!(
+            normalize_cookie_domain(".example.com").unwrap(),
+            ".example.com"
+        );
         assert_eq!(
             normalize_cookie_domain("https://Bastion.Example.com:8443/x").unwrap(),
             ".bastion.example.com"
@@ -169,7 +215,10 @@ mod tests {
         assert_eq!(normalize_cookie_domain("   ").unwrap(), "");
         assert!(normalize_cookie_domain("localhost").is_err());
         assert!(normalize_cookie_domain("bad domain.com").is_err());
-        assert_eq!(normalize_cookie_domain("example.com.").unwrap(), ".example.com");
+        assert_eq!(
+            normalize_cookie_domain("example.com.").unwrap(),
+            ".example.com"
+        );
     }
 
     #[test]

@@ -10,9 +10,7 @@ use crate::error::AppResult;
 use crate::models::UserCtx;
 use crate::oauth::Provider;
 use crate::state::AppState;
-use crate::templates::{
-    avatar, bottom_strip, corner_mark, landing_page, layout, provider_icon,
-};
+use crate::templates::{avatar, bottom_strip, corner_mark, landing_page, layout, provider_icon};
 
 pub async fn index(
     State(state): State<AppState>,
@@ -88,12 +86,11 @@ async fn dashboard(state: &AppState, user: &UserCtx) -> AppResult<maud::Markup> 
     .fetch_all(&state.pool)
     .await?;
 
-    let linked_providers: Vec<(String,)> = sqlx::query_as(
-        "SELECT provider FROM user_identities WHERE user_id = ? ORDER BY linked_at",
-    )
-    .bind(user.id)
-    .fetch_all(&state.pool)
-    .await?;
+    let linked_providers: Vec<(String,)> =
+        sqlx::query_as("SELECT provider FROM user_identities WHERE user_id = ? ORDER BY linked_at")
+            .bind(user.id)
+            .fetch_all(&state.pool)
+            .await?;
     let providers_text = linked_providers
         .iter()
         .map(|(p,)| p.clone())

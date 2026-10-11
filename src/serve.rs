@@ -96,7 +96,10 @@ where
 /// Accept errors are mostly transient — out of descriptors under load, a
 /// connection reset before accept returned. Back off briefly instead of
 /// taking the listener, and with it every host, down.
-async fn accept(listener: &TcpListener, limits: &Limits) -> (tokio::net::TcpStream, SocketAddr, ConnPermit) {
+async fn accept(
+    listener: &TcpListener,
+    limits: &Limits,
+) -> (tokio::net::TcpStream, SocketAddr, ConnPermit) {
     let permit = limits
         .0
         .clone()
@@ -124,7 +127,12 @@ pub async fn plain(listener: TcpListener, limits: Limits, app: Router) {
     }
 }
 
-pub async fn tls(listener: TcpListener, limits: Limits, config: Arc<rustls::ServerConfig>, app: Router) {
+pub async fn tls(
+    listener: TcpListener,
+    limits: Limits,
+    config: Arc<rustls::ServerConfig>,
+    app: Router,
+) {
     let acceptor = tokio_rustls::TlsAcceptor::from(config);
     loop {
         let (stream, peer, permit) = accept(&listener, &limits).await;
@@ -145,9 +153,11 @@ pub async fn tls(listener: TcpListener, limits: Limits, config: Arc<rustls::Serv
 /// Port 80: send anything bastion serves to https, and nothing else anywhere.
 pub fn redirect_app(state: AppState, https_port: u16) -> Router {
     Router::new()
-        .fallback(move |State(state): State<AppState>, req: Request| async move {
-            redirect_to_https(&state, https_port, req).await
-        })
+        .fallback(
+            move |State(state): State<AppState>, req: Request| async move {
+                redirect_to_https(&state, https_port, req).await
+            },
+        )
         .with_state(state)
 }
 
@@ -170,8 +180,16 @@ async fn redirect_to_https(state: &AppState, https_port: u16, req: Request) -> R
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
     }
-    let authority = if https_port == 443 { host } else { format!("{}:{}", host, https_port) };
-    let pq = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/");
+    let authority = if https_port == 443 {
+        host
+    } else {
+        format!("{}:{}", host, https_port)
+    };
+    let pq = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str())
+        .unwrap_or("/");
     // 308 rather than 301 so a POST stays a POST.
     Redirect::permanent(&format!("https://{}{}", authority, pq)).into_response()
 }
@@ -192,7 +210,12 @@ struct StallTimeout {
 
 impl StallTimeout {
     fn new(inner: Incoming, after: Duration) -> StallTimeout {
-        StallTimeout { inner, after, sleep: Box::pin(tokio::time::sleep(after)), waiting: false }
+        StallTimeout {
+            inner,
+            after,
+            sleep: Box::pin(tokio::time::sleep(after)),
+            waiting: false,
+        }
     }
 }
 

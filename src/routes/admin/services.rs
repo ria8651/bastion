@@ -26,9 +26,18 @@ pub async fn services_page(
     let ctx = ctx(&state, &headers, user).await?;
 
     #[allow(clippy::type_complexity)]
-    let rows: Vec<(i64, String, String, String, Option<i64>, i64, i64, String, Option<String>)> =
-        sqlx::query_as(
-            "SELECT s.id, s.slug, s.name, s.status, s.registered_at,
+    let rows: Vec<(
+        i64,
+        String,
+        String,
+        String,
+        Option<i64>,
+        i64,
+        i64,
+        String,
+        Option<String>,
+    )> = sqlx::query_as(
+        "SELECT s.id, s.slug, s.name, s.status, s.registered_at,
                     (SELECT COUNT(*) FROM grants g WHERE g.service_id = s.id),
                     (SELECT COUNT(*) FROM permissions p
                       WHERE p.service_id = s.id AND p.removed_at IS NULL),
@@ -38,9 +47,9 @@ pub async fn services_page(
              FROM services s
              WHERE s.deleted_at IS NULL
              ORDER BY s.slug",
-        )
-        .fetch_all(&state.pool)
-        .await?;
+    )
+    .fetch_all(&state.pool)
+    .await?;
     let of = |st: &'static str| rows.iter().filter(move |r| r.3 == st);
     let approved: Vec<_> = of("approved").collect();
     let pending: Vec<_> = of("pending").collect();
@@ -203,16 +212,22 @@ pub async fn service_detail(
     let ctx = ctx(&state, &headers, user).await?;
 
     #[allow(clippy::type_complexity)]
-    let row: Option<(String, String, String, String, Option<String>, Option<i64>, i64)> =
-        sqlx::query_as(
-            "SELECT slug, name, return_url, status, public_jwk, registered_at, created_at
+    let row: Option<(
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<i64>,
+        i64,
+    )> = sqlx::query_as(
+        "SELECT slug, name, return_url, status, public_jwk, registered_at, created_at
              FROM services WHERE id = ? AND deleted_at IS NULL",
-        )
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await?;
-    let Some((slug, name, return_url, status, jwk, registered, created)) = row
-    else {
+    )
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((slug, name, return_url, status, jwk, registered, created)) = row else {
         return Err(AppError::NotFound);
     };
 
@@ -432,7 +447,9 @@ pub async fn service_detail(
 }
 
 pub fn jwk_short(jwk_str: Option<&str>) -> String {
-    let Some(s) = jwk_str else { return "—".into() };
+    let Some(s) = jwk_str else {
+        return "—".into();
+    };
     serde_json::from_str::<serde_json::Value>(s)
         .ok()
         .and_then(|v| v.get("kid").and_then(|k| k.as_str()).map(String::from))
@@ -440,7 +457,9 @@ pub fn jwk_short(jwk_str: Option<&str>) -> String {
 }
 
 pub fn jwk_thumbprint_short(jwk_str: Option<&str>) -> String {
-    let Some(s) = jwk_str else { return "—".into() };
+    let Some(s) = jwk_str else {
+        return "—".into();
+    };
     crate::routes::registration::jwk_thumbprint(s)
 }
 
@@ -469,12 +488,19 @@ fn validate(slug: &str, name: &str, return_url: &str) -> Result<ServiceFields, S
     let slug = slug.trim().to_string();
     let name = {
         let n = name.trim();
-        if n.is_empty() { slug.clone() } else { n.to_string() }
+        if n.is_empty() {
+            slug.clone()
+        } else {
+            n.to_string()
+        }
     };
     if slug.is_empty() {
         return Err("slug required".into());
     }
-    if !slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+    if !slug
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
         return Err("slug must be lowercase alphanumeric + dashes".into());
     }
     // Optional: empty means the service is only reached through gated routes.
@@ -482,7 +508,11 @@ fn validate(slug: &str, name: &str, return_url: &str) -> Result<ServiceFields, S
     if !return_url.is_empty() && url::Url::parse(&return_url).is_err() {
         return Err("return url must be a valid URL".into());
     }
-    Ok(ServiceFields { slug, name, return_url })
+    Ok(ServiceFields {
+        slug,
+        name,
+        return_url,
+    })
 }
 
 pub async fn add_service(
@@ -533,15 +563,16 @@ pub async fn update_service(
     Form(f): Form<ServiceForm>,
 ) -> AppResult<Response> {
     let admin = admin(user)?;
-    let id = f.id.ok_or_else(|| AppError::BadRequest("missing service id".into()))?;
+    let id =
+        f.id.ok_or_else(|| AppError::BadRequest("missing service id".into()))?;
     let v = validate(&f.slug, &f.name, &f.return_url).map_err(AppError::BadRequest)?;
     sqlx::query("UPDATE services SET slug = ?, name = ?, return_url = ? WHERE id = ?")
-    .bind(&v.slug)
-    .bind(&v.name)
-    .bind(&v.return_url)
-    .bind(id)
-    .execute(&state.pool)
-    .await?;
+        .bind(&v.slug)
+        .bind(&v.name)
+        .bind(&v.return_url)
+        .bind(id)
+        .execute(&state.pool)
+        .await?;
     audit(
         &state.pool,
         Some(admin.id),
@@ -603,11 +634,16 @@ pub async fn approve_registration(
         return Err(AppError::BadRequest("not found".into()));
     };
     if status != "pending" {
-        return Err(AppError::BadRequest(format!("service is {}, not pending", status)));
+        return Err(AppError::BadRequest(format!(
+            "service is {}, not pending",
+            status
+        )));
     }
     let return_url = f.return_url.trim();
     if return_url.is_empty() || url::Url::parse(return_url).is_err() {
-        return Err(AppError::BadRequest("return url must be a valid URL".into()));
+        return Err(AppError::BadRequest(
+            "return url must be a valid URL".into(),
+        ));
     }
     sqlx::query(
         "UPDATE services
@@ -646,7 +682,10 @@ pub async fn deny_registration(
         return Err(AppError::BadRequest("not found".into()));
     };
     if status != "pending" {
-        return Err(AppError::BadRequest(format!("service is {}, not pending", status)));
+        return Err(AppError::BadRequest(format!(
+            "service is {}, not pending",
+            status
+        )));
     }
     sqlx::query("UPDATE services SET status = 'denied' WHERE id = ?")
         .bind(f.id)

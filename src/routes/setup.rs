@@ -13,16 +13,16 @@ use crate::middleware::require_admin;
 use crate::models::UserCtx;
 use crate::setup::{clear_oauth_config, get_setup_state, set_oauth_config};
 use crate::state::{origin_from, AppState};
-use crate::templates::{
-    bottom_strip, host_from_origin, layout, page_chrome, pill, provider_icon,
-};
+use crate::templates::{bottom_strip, host_from_origin, layout, page_chrome, pill, provider_icon};
 
 pub async fn page(
     State(state): State<AppState>,
     headers: HeaderMap,
     user: Option<Extension<UserCtx>>,
 ) -> AppResult<Response> {
-    let setup = get_setup_state(&state.pool).await.map_err(AppError::Other)?;
+    let setup = get_setup_state(&state.pool)
+        .await
+        .map_err(AppError::Other)?;
     let step = setup.step();
     let origin = origin_from(&state, &headers);
     let host = host_from_origin(&origin).to_string();
@@ -479,7 +479,7 @@ fn pending_block(
                                 }
                                 div {
                                     div.lbl { "registered" }
-                                    div.val { (registered_at.map(|t| crate::routes::admin::rel_time(t)).unwrap_or_else(|| "—".into())) }
+                                    div.val { (registered_at.map(crate::routes::admin::rel_time).unwrap_or_else(|| "—".into())) }
                                 }
                             }
                             @let perms_here = pending_perms.get(sid);
@@ -541,7 +541,9 @@ pub async fn save_provider(
     if provider != "github" && provider != "google" {
         return Err(AppError::BadRequest("unknown provider".into()));
     }
-    let setup = get_setup_state(&state.pool).await.map_err(AppError::Other)?;
+    let setup = get_setup_state(&state.pool)
+        .await
+        .map_err(AppError::Other)?;
     // Once an admin is claimed and services exist (setup complete), use /admin/providers instead.
     if setup.complete() {
         return Err(AppError::BadRequest(
@@ -577,7 +579,9 @@ pub async fn reset_provider(
     if provider != "github" && provider != "google" {
         return Err(AppError::BadRequest("unknown provider".into()));
     }
-    let setup = get_setup_state(&state.pool).await.map_err(AppError::Other)?;
+    let setup = get_setup_state(&state.pool)
+        .await
+        .map_err(AppError::Other)?;
     if setup.has_admin {
         return Err(AppError::BadRequest(
             "can't reset provider creds after an admin has been claimed".into(),
@@ -702,12 +706,11 @@ pub async fn approve_service(
 ) -> AppResult<Response> {
     let user = user.map(|Extension(u)| u);
     let admin = require_admin(user.as_ref())?.clone();
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT slug, status FROM services WHERE id = ? AND deleted_at IS NULL",
-    )
-    .bind(f.id)
-    .fetch_optional(&state.pool)
-    .await?;
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT slug, status FROM services WHERE id = ? AND deleted_at IS NULL")
+            .bind(f.id)
+            .fetch_optional(&state.pool)
+            .await?;
     let Some((slug, status)) = row else {
         return Err(AppError::BadRequest("not found".into()));
     };
@@ -719,7 +722,9 @@ pub async fn approve_service(
     }
     let return_url = f.return_url.trim();
     if return_url.is_empty() || url::Url::parse(return_url).is_err() {
-        return Err(AppError::BadRequest("return url must be a valid URL".into()));
+        return Err(AppError::BadRequest(
+            "return url must be a valid URL".into(),
+        ));
     }
     sqlx::query(
         "UPDATE services
@@ -750,12 +755,11 @@ pub async fn deny_service(
 ) -> AppResult<Response> {
     let user = user.map(|Extension(u)| u);
     let admin = require_admin(user.as_ref())?.clone();
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT slug, status FROM services WHERE id = ? AND deleted_at IS NULL",
-    )
-    .bind(f.id)
-    .fetch_optional(&state.pool)
-    .await?;
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT slug, status FROM services WHERE id = ? AND deleted_at IS NULL")
+            .bind(f.id)
+            .fetch_optional(&state.pool)
+            .await?;
     let Some((slug, status)) = row else {
         return Err(AppError::BadRequest("not found".into()));
     };
@@ -787,7 +791,9 @@ pub async fn finish(
 ) -> AppResult<Response> {
     let user = user.map(|Extension(u)| u);
     require_admin(user.as_ref())?;
-    let setup = get_setup_state(&state.pool).await.map_err(AppError::Other)?;
+    let setup = get_setup_state(&state.pool)
+        .await
+        .map_err(AppError::Other)?;
     if !setup.complete() {
         return Err(AppError::BadRequest("setup not complete yet".into()));
     }

@@ -86,7 +86,13 @@ async fn ctx(
     Ok(ui::Ctx {
         viewer,
         host,
-        counts: ui::NavCounts { users, pending_requests, services, pending_services, routes },
+        counts: ui::NavCounts {
+            users,
+            pending_requests,
+            services,
+            pending_services,
+            routes,
+        },
     })
 }
 

@@ -90,7 +90,10 @@ pub async fn issue_service_token(pool: &SqlitePool, args: IssueArgs<'_>) -> Resu
     let jwt = jwt::encode_with_signer(&payload, &header, &signer)
         .map_err(|e| anyhow!("encode jwt: {}", e))?;
 
-    Ok(IssuedToken { jwt, expires_at: exp })
+    Ok(IssuedToken {
+        jwt,
+        expires_at: exp,
+    })
 }
 
 fn systime(unix: i64) -> SystemTime {
@@ -103,19 +106,17 @@ pub async fn verify_service_token(
     issuer: &str,
     token: &str,
 ) -> Result<JwtPayload> {
-    let header =
-        jwt::decode_header(token).map_err(|e| anyhow!("decode header: {}", e))?;
+    let header = jwt::decode_header(token).map_err(|e| anyhow!("decode header: {}", e))?;
     let kid = header
         .claim("kid")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("missing kid"))?;
 
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT public_jwk FROM signing_keys WHERE kid = ? AND retired_at IS NULL",
-    )
-    .bind(kid)
-    .fetch_optional(pool)
-    .await?;
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT public_jwk FROM signing_keys WHERE kid = ? AND retired_at IS NULL")
+            .bind(kid)
+            .fetch_optional(pool)
+            .await?;
     let (jwk_str,) = row.ok_or_else(|| anyhow!("unknown or retired kid"))?;
     let jwk =
         Jwk::from_bytes(jwk_str.as_bytes()).map_err(|e| anyhow!("decode public jwk: {}", e))?;

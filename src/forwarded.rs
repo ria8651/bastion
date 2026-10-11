@@ -29,7 +29,8 @@ pub struct Trusted(Vec<(IpAddr, u8)>);
 /// Behind a gateway: loopback and private ranges, since that gateway is on the
 /// same box or the same LAN. A LAN client can therefore choose the IP it is
 /// logged as, which is the usual homelab trade.
-const BEHIND_GATEWAY: &str = "127.0.0.0/8, ::1/128, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7";
+const BEHIND_GATEWAY: &str =
+    "127.0.0.0/8, ::1/128, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7";
 
 /// As the edge, nothing sits in front, so nobody's forwarding headers count.
 /// The private-range default would be actively wrong there: Docker's userland
@@ -43,7 +44,10 @@ impl Trusted {
     /// Unset, it depends on whether bastion is the edge.
     pub fn parse(raw: Option<&str>, edge: bool) -> Result<Trusted, String> {
         let default = if edge { AS_EDGE } else { BEHIND_GATEWAY };
-        let raw = raw.map(str::trim).filter(|s| !s.is_empty()).unwrap_or(default);
+        let raw = raw
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(default);
         if raw.eq_ignore_ascii_case("none") {
             return Ok(Trusted(Vec::new()));
         }
@@ -97,11 +101,19 @@ fn parse_cidr(s: &str) -> Result<(IpAddr, u8), String> {
 fn in_cidr(ip: IpAddr, net: IpAddr, bits: u8) -> bool {
     match (ip, net) {
         (IpAddr::V4(a), IpAddr::V4(n)) => {
-            let mask = if bits == 0 { 0 } else { u32::MAX << (32 - bits) };
+            let mask = if bits == 0 {
+                0
+            } else {
+                u32::MAX << (32 - bits)
+            };
             u32::from(a) & mask == u32::from(n) & mask
         }
         (IpAddr::V6(a), IpAddr::V6(n)) => {
-            let mask = if bits == 0 { 0 } else { u128::MAX << (128 - bits) };
+            let mask = if bits == 0 {
+                0
+            } else {
+                u128::MAX << (128 - bits)
+            };
             u128::from(a) & mask == u128::from(n) & mask
         }
         _ => false,
@@ -127,7 +139,10 @@ pub fn resolve(trusted: &Trusted, peer: IpAddr, headers: &HeaderMap, conn: ConnM
     let proto = if conn.tls {
         "https"
     } else if from_proxy {
-        match header(headers, "x-forwarded-proto").and_then(|v| v.split(',').next()).map(str::trim) {
+        match header(headers, "x-forwarded-proto")
+            .and_then(|v| v.split(',').next())
+            .map(str::trim)
+        {
             Some("https") => "https",
             _ => "http",
         }
@@ -136,7 +151,11 @@ pub fn resolve(trusted: &Trusted, peer: IpAddr, headers: &HeaderMap, conn: ConnM
     };
 
     if !from_proxy {
-        return Forwarded { client: peer, chain: peer.to_string(), proto };
+        return Forwarded {
+            client: peer,
+            chain: peer.to_string(),
+            proto,
+        };
     }
 
     let inbound: Vec<String> = headers
@@ -171,7 +190,11 @@ pub fn resolve(trusted: &Trusted, peer: IpAddr, headers: &HeaderMap, conn: ConnM
 
     let mut chain = inbound;
     chain.push(peer.to_string());
-    Forwarded { client, chain: chain.join(", "), proto }
+    Forwarded {
+        client,
+        chain: chain.join(", "),
+        proto,
+    }
 }
 
 fn header<'a>(h: &'a HeaderMap, name: &str) -> Option<&'a str> {
@@ -209,10 +232,16 @@ mod tests {
         assert!(t.contains(ip("::ffff:192.168.1.9")));
 
         assert!(Trusted::parse(Some("none"), false).unwrap().0.is_empty());
-        assert!(Trusted::parse(None, false).unwrap().contains(ip("172.20.0.3")));
+        assert!(Trusted::parse(None, false)
+            .unwrap()
+            .contains(ip("172.20.0.3")));
         // As the edge, nobody is in front, so nobody is believed by default.
-        assert!(!Trusted::parse(None, true).unwrap().contains(ip("172.20.0.3")));
-        assert!(Trusted::parse(Some("10.0.0.1"), true).unwrap().contains(ip("10.0.0.1")));
+        assert!(!Trusted::parse(None, true)
+            .unwrap()
+            .contains(ip("172.20.0.3")));
+        assert!(Trusted::parse(Some("10.0.0.1"), true)
+            .unwrap()
+            .contains(ip("10.0.0.1")));
         assert!(Trusted::parse(Some("192.168.1.0/33"), false).is_err());
         assert!(Trusted::parse(Some("nope"), false).is_err());
     }
@@ -223,7 +252,11 @@ mod tests {
         let f = resolve(
             &t,
             ip("203.0.113.7"),
-            &h(&[("x-forwarded-for", "1.2.3.4"), ("x-real-ip", "1.2.3.4"), ("x-forwarded-proto", "https")]),
+            &h(&[
+                ("x-forwarded-for", "1.2.3.4"),
+                ("x-real-ip", "1.2.3.4"),
+                ("x-forwarded-proto", "https"),
+            ]),
             ConnMeta::default(),
         );
         assert_eq!(f.client, ip("203.0.113.7"));
@@ -239,7 +272,10 @@ mod tests {
         let f = resolve(
             &t,
             ip("192.168.1.2"),
-            &h(&[("x-forwarded-for", "6.6.6.6, 198.51.100.4"), ("x-forwarded-proto", "https")]),
+            &h(&[
+                ("x-forwarded-for", "6.6.6.6, 198.51.100.4"),
+                ("x-forwarded-proto", "https"),
+            ]),
             ConnMeta::default(),
         );
         assert_eq!(f.client, ip("198.51.100.4"));
@@ -247,14 +283,24 @@ mod tests {
         assert_eq!(f.proto, "https");
 
         // X-Real-IP only when there's no chain at all.
-        let f = resolve(&t, ip("192.168.1.2"), &h(&[("x-real-ip", "198.51.100.9")]), ConnMeta::default());
+        let f = resolve(
+            &t,
+            ip("192.168.1.2"),
+            &h(&[("x-real-ip", "198.51.100.9")]),
+            ConnMeta::default(),
+        );
         assert_eq!(f.client, ip("198.51.100.9"));
     }
 
     #[test]
     fn our_own_tls_listener_knows_its_scheme() {
         let t = Trusted::parse(Some("none"), false).unwrap();
-        let f = resolve(&t, ip("203.0.113.7"), &h(&[("x-forwarded-proto", "http")]), ConnMeta { tls: true });
+        let f = resolve(
+            &t,
+            ip("203.0.113.7"),
+            &h(&[("x-forwarded-proto", "http")]),
+            ConnMeta { tls: true },
+        );
         assert_eq!(f.proto, "https");
     }
 }

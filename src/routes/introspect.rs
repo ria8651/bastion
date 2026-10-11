@@ -9,10 +9,7 @@ use serde_json::{json, Value};
 use crate::jwt::verify_service_token;
 use crate::state::{origin_from, AppState};
 
-pub async fn introspect(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Response {
+pub async fn introspect(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let token = match extract_bearer(&headers) {
         Some(t) => t,
         None => {
@@ -37,9 +34,7 @@ pub async fn introspect(
     };
 
     let claims = payload.claims_set();
-    let user_id = claims
-        .get("bastion_uid")
-        .and_then(Value::as_i64);
+    let user_id = claims.get("bastion_uid").and_then(Value::as_i64);
     let Some(user_id) = user_id else {
         return (
             StatusCode::UNAUTHORIZED,
@@ -48,19 +43,20 @@ pub async fn introspect(
             .into_response();
     };
 
-    let user: Option<(i64, String, Option<String>, Option<String>, String, bool)> = match sqlx::query_as(
-        "SELECT id, username, email, avatar, status, is_admin FROM users WHERE id = ?",
-    )
-    .bind(user_id)
-    .fetch_optional(&state.pool)
-    .await
-    {
-        Ok(u) => u,
-        Err(e) => {
-            tracing::error!(error = ?e, "introspect user lookup");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "db error").into_response();
-        }
-    };
+    let user: Option<(i64, String, Option<String>, Option<String>, String, bool)> =
+        match sqlx::query_as(
+            "SELECT id, username, email, avatar, status, is_admin FROM users WHERE id = ?",
+        )
+        .bind(user_id)
+        .fetch_optional(&state.pool)
+        .await
+        {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::error!(error = ?e, "introspect user lookup");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "db error").into_response();
+            }
+        };
     let Some((uid, username, email, avatar, status, is_admin)) = user else {
         return (
             StatusCode::UNAUTHORIZED,
@@ -135,9 +131,7 @@ pub async fn introspect(
 fn extract_bearer(headers: &HeaderMap) -> Option<String> {
     let v = headers.get("authorization")?.to_str().ok()?;
     let s = v.trim();
-    if let Some(rest) = s.strip_prefix("Bearer ").or_else(|| s.strip_prefix("bearer ")) {
-        Some(rest.trim().to_string())
-    } else {
-        None
-    }
+    s.strip_prefix("Bearer ")
+        .or_else(|| s.strip_prefix("bearer "))
+        .map(|rest| rest.trim().to_string())
 }

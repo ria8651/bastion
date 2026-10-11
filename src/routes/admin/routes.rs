@@ -10,7 +10,9 @@ use axum::{
 use maud::{html, Markup};
 use serde::Deserialize;
 
-use super::ui::{back, badge, empty, field, header, notice, section, status_badge, switch, tile, Nav, Post, Tone};
+use super::ui::{
+    back, badge, empty, field, header, notice, section, status_badge, switch, tile, Nav, Post, Tone,
+};
 use super::{admin, ctx, fmt_time, ProxyHealth};
 use crate::audit::audit;
 use crate::error::{AppError, AppResult};
@@ -64,7 +66,16 @@ pub async fn routes_page(
     let ctx = ctx(&state, &headers, user).await?;
 
     #[allow(clippy::type_complexity)]
-    let routes: Vec<(i64, String, String, bool, bool, String, Option<i64>, Option<String>)> = sqlx::query_as(
+    let routes: Vec<(
+        i64,
+        String,
+        String,
+        bool,
+        bool,
+        String,
+        Option<i64>,
+        Option<String>,
+    )> = sqlx::query_as(
         "SELECT r.id, r.name, r.upstream_url, r.tls_skip_verify, r.enabled,
                 COALESCE((SELECT group_concat(host, ', ') FROM
                            (SELECT host FROM route_hosts WHERE route_id = r.id ORDER BY host)), ''),
@@ -146,8 +157,15 @@ struct FormValues<'a> {
 /// `choices` is the approved services; a route still pointing at one that has
 /// gone is offered it too, marked, so saving some other edit can't silently
 /// flip the route open by falling back to the first option.
-fn route_form(action: &str, submit: &str, v: &FormValues, choices: &[(i64, String, String)]) -> Markup {
-    let current_missing = v.service_id.filter(|id| !choices.iter().any(|c| c.0 == *id));
+fn route_form(
+    action: &str,
+    submit: &str,
+    v: &FormValues,
+    choices: &[(i64, String, String)],
+) -> Markup {
+    let current_missing = v
+        .service_id
+        .filter(|id| !choices.iter().any(|c| c.0 == *id));
     html! {
         form.form method="post" action=(action) data-gated=(if v.service_id.is_some() { "1" } else { "" }) {
             @if let Some(id) = v.id { input type="hidden" name="id" value=(id); }
@@ -234,7 +252,16 @@ pub async fn route_detail(
 ) -> AppResult<Response> {
     let ctx = ctx(&state, &headers, user).await?;
     #[allow(clippy::type_complexity)]
-    let row: Option<(String, String, bool, bool, i64, Option<i64>, Option<String>, Option<String>)> = sqlx::query_as(
+    let row: Option<(
+        String,
+        String,
+        bool,
+        bool,
+        i64,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+    )> = sqlx::query_as(
         "SELECT r.name, r.upstream_url, r.tls_skip_verify, r.enabled, r.created_at,
                 r.service_id, r.public_paths,
                 (SELECT s.slug FROM services s WHERE s.id = r.service_id
@@ -244,13 +271,15 @@ pub async fn route_detail(
     .bind(id)
     .fetch_optional(&state.pool)
     .await?;
-    let Some((name, upstream, skip_verify, enabled, created, service_id, public_paths, slug)) = row else {
+    let Some((name, upstream, skip_verify, enabled, created, service_id, public_paths, slug)) = row
+    else {
         return Err(AppError::NotFound);
     };
-    let hosts: Vec<(String,)> = sqlx::query_as("SELECT host FROM route_hosts WHERE route_id = ? ORDER BY host")
-        .bind(id)
-        .fetch_all(&state.pool)
-        .await?;
+    let hosts: Vec<(String,)> =
+        sqlx::query_as("SELECT host FROM route_hosts WHERE route_id = ? ORDER BY host")
+            .bind(id)
+            .fetch_all(&state.pool)
+            .await?;
     let hosts: Vec<String> = hosts.into_iter().map(|(h,)| h).collect();
     let choices = gate_choices(&state).await?;
     let access = Access::of(service_id, slug);
@@ -354,7 +383,10 @@ fn validate(f: &RouteForm, own_ports: &[u16]) -> Result<RouteFields, String> {
     };
     let service_id = match f.service_id.trim() {
         "" => None,
-        s => Some(s.parse::<i64>().map_err(|_| "unknown service".to_string())?),
+        s => Some(
+            s.parse::<i64>()
+                .map_err(|_| "unknown service".to_string())?,
+        ),
     };
     // Public paths are holes in a gate; on an open route there's no gate to
     // have holes in, and keeping stale ones would quietly reopen them the day
@@ -363,7 +395,14 @@ fn validate(f: &RouteForm, own_ports: &[u16]) -> Result<RouteFields, String> {
         .and(Some(f.public_paths.trim()))
         .filter(|p| !p.is_empty())
         .map(str::to_string);
-    Ok(RouteFields { name, hosts, upstream, skip_verify: f.skip_verify.is_some(), service_id, public_paths })
+    Ok(RouteFields {
+        name,
+        hosts,
+        upstream,
+        skip_verify: f.skip_verify.is_some(),
+        service_id,
+        public_paths,
+    })
 }
 
 /// A gate has to be a live, approved service.
@@ -388,7 +427,11 @@ async fn refuse_dead_gate(state: &AppState, service_id: Option<i64>) -> AppResul
 /// A gated hostname has to be under the session cookie domain, or the cookie
 /// never reaches it and sign-in loops. With no domain set at all the gate
 /// explains that itself, so there's nothing to check against yet.
-async fn refuse_uncovered_hosts(state: &AppState, hosts: &[String], service_id: Option<i64>) -> AppResult<()> {
+async fn refuse_uncovered_hosts(
+    state: &AppState,
+    hosts: &[String],
+    service_id: Option<i64>,
+) -> AppResult<()> {
     if service_id.is_none() {
         return Ok(());
     }
@@ -410,14 +453,24 @@ async fn refuse_uncovered_hosts(state: &AppState, hosts: &[String], service_id: 
 }
 
 /// Refuse a name another route already holds, or bastion's own.
-async fn refuse_claimed_hosts(state: &AppState, hosts: &[String], id: Option<i64>) -> AppResult<()> {
+async fn refuse_claimed_hosts(
+    state: &AppState,
+    hosts: &[String],
+    id: Option<i64>,
+) -> AppResult<()> {
     let own = state.origin.as_deref().and_then(crate::host::of_url);
     for h in hosts {
         if own.as_deref() == Some(h.as_str()) {
-            return Err(AppError::BadRequest(format!("{} is bastion's own hostname", h)));
+            return Err(AppError::BadRequest(format!(
+                "{} is bastion's own hostname",
+                h
+            )));
         }
         if let Some(owner) = crate::edge::host_owner(&state.pool, h, id).await? {
-            return Err(AppError::BadRequest(format!("{} is already served by route {}", h, owner)));
+            return Err(AppError::BadRequest(format!(
+                "{} is already served by route {}",
+                h, owner
+            )));
         }
     }
     Ok(())
@@ -486,7 +539,8 @@ pub async fn update_route(
     Form(f): Form<RouteForm>,
 ) -> AppResult<Response> {
     let admin = admin(user)?;
-    let id = f.id.ok_or_else(|| AppError::BadRequest("missing route id".into()))?;
+    let id =
+        f.id.ok_or_else(|| AppError::BadRequest("missing route id".into()))?;
     let v = validate(&f, &state.ports).map_err(AppError::BadRequest)?;
     let gate = refuse_dead_gate(&state, v.service_id).await?;
     refuse_uncovered_hosts(&state, &v.hosts, v.service_id).await?;
@@ -534,17 +588,22 @@ pub async fn toggle_route(
     Form(f): Form<RouteIdForm>,
 ) -> AppResult<Response> {
     let admin = admin(user)?;
-    let row: Option<(bool,)> = sqlx::query_as("UPDATE routes SET enabled = NOT enabled WHERE id = ? RETURNING enabled")
-        .bind(f.id)
-        .fetch_optional(&state.pool)
-        .await?;
+    let row: Option<(bool,)> =
+        sqlx::query_as("UPDATE routes SET enabled = NOT enabled WHERE id = ? RETURNING enabled")
+            .bind(f.id)
+            .fetch_optional(&state.pool)
+            .await?;
     let Some((enabled,)) = row else {
         return Err(AppError::NotFound);
     };
     audit(
         &state.pool,
         Some(admin.id),
-        if enabled { "route.enable" } else { "route.disable" },
+        if enabled {
+            "route.enable"
+        } else {
+            "route.disable"
+        },
         Some(&format!("route:{}", f.id)),
         None,
     )

@@ -23,9 +23,8 @@ pub(super) struct Event {
 }
 
 pub(super) async fn load_events(state: &AppState, limit: i64) -> AppResult<Vec<Event>> {
-    let rows: Vec<(i64, String, Option<String>, Option<String>, Option<String>)> =
-        sqlx::query_as(
-            "SELECT a.at, a.action, u.username,
+    let rows: Vec<(i64, String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT a.at, a.action, u.username,
                     CASE
                       WHEN a.target LIKE 'user:%'
                         THEN (SELECT u2.username FROM users u2
@@ -40,13 +39,19 @@ pub(super) async fn load_events(state: &AppState, limit: i64) -> AppResult<Vec<E
                     a.meta
              FROM audit_log a LEFT JOIN users u ON u.id = a.actor_id
              ORDER BY a.at DESC, a.id DESC LIMIT ?",
-        )
-        .bind(limit)
-        .fetch_all(&state.pool)
-        .await?;
+    )
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await?;
     Ok(rows
         .into_iter()
-        .map(|(at, action, actor, target, meta)| Event { at, action, actor, target, meta })
+        .map(|(at, action, actor, target, meta)| Event {
+            at,
+            action,
+            actor,
+            target,
+            meta,
+        })
         .collect())
 }
 

@@ -52,15 +52,13 @@ pub async fn get_active_signing_key(pool: &SqlitePool) -> Result<ActiveKey> {
     let pub_str = serde_json::to_string(public_jwk.as_ref())?;
     let priv_str = serde_json::to_string(private_jwk.as_ref())?;
 
-    sqlx::query(
-        "INSERT INTO signing_keys (kid, alg, public_jwk, private_jwk) VALUES (?, ?, ?, ?)",
-    )
-    .bind(&kid)
-    .bind(ALG)
-    .bind(&pub_str)
-    .bind(&priv_str)
-    .execute(pool)
-    .await?;
+    sqlx::query("INSERT INTO signing_keys (kid, alg, public_jwk, private_jwk) VALUES (?, ?, ?, ?)")
+        .bind(&kid)
+        .bind(ALG)
+        .bind(&pub_str)
+        .bind(&priv_str)
+        .execute(pool)
+        .await?;
 
     Ok(ActiveKey { kid, private_jwk })
 }

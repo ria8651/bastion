@@ -12,18 +12,18 @@ use tower_cookies::Cookies;
 use crate::audit::audit;
 use crate::error::{AppError, AppResult};
 use crate::models::UserCtx;
-use sqlx::SqlitePool;
 use crate::oauth::{
     build_authorize_url, clear_state_cookie, exchange_code, fetch_user, generate_state,
     read_state_cookie, set_state_cookie, OAuthState, Provider, RemoteUser,
 };
 use crate::session::{
-    create_session, generate_session_token, invalidate_session,
-    read_session_cookie, set_session_cookie,
+    create_session, generate_session_token, invalidate_session, read_session_cookie,
+    set_session_cookie,
 };
 use crate::setup::get_oauth_config;
 use crate::state::{is_secure, origin_from, AppState};
 use crate::templates::{landing_page, provider_icon};
+use sqlx::SqlitePool;
 
 #[derive(Debug, Deserialize)]
 pub struct LoginQuery {
@@ -106,9 +106,7 @@ pub async fn login_page(
     // redirect target is attacker-supplied by construction. Nothing downstream
     // may use it before it has been matched against a registered proxy host.
     let redirect = match q.redirect.as_deref() {
-        Some(r) => {
-            crate::proxy::validate_redirect(&state.pool, r, q.service.as_deref()).await
-        }
+        Some(r) => crate::proxy::validate_redirect(&state.pool, r, q.service.as_deref()).await,
         None => None,
     };
 
@@ -284,7 +282,10 @@ pub async fn login_post(
     let cfg = get_oauth_config(&state.pool, provider.as_str())
         .await?
         .ok_or_else(|| {
-            AppError::BadRequest(format!("{} OAuth not configured yet", provider.display_name()))
+            AppError::BadRequest(format!(
+                "{} OAuth not configured yet",
+                provider.display_name()
+            ))
         })?;
 
     // Guard claim_admin: only allowed when no admin exists.
@@ -301,9 +302,7 @@ pub async fn login_post(
     // Re-validated rather than trusted from the form: the hidden field is as
     // forgeable as the query parameter it came from.
     let redirect = match f.redirect.as_deref() {
-        Some(r) => {
-            crate::proxy::validate_redirect(&state.pool, r, f.service.as_deref()).await
-        }
+        Some(r) => crate::proxy::validate_redirect(&state.pool, r, f.service.as_deref()).await,
         None => None,
     };
 
@@ -366,8 +365,10 @@ pub async fn callback(
 
     // ─── Linking flow: attach this identity to an already-signed-in user. ───
     if let Some(link_uid) = stored.link_to_user_id {
-        return link_identity_and_redirect(&state, &cookies, &headers, addr, link_uid, provider, &remote)
-            .await;
+        return link_identity_and_redirect(
+            &state, &cookies, &headers, addr, link_uid, provider, &remote,
+        )
+        .await;
     }
 
     // ─── Normal login / signup flow. ───
@@ -514,7 +515,7 @@ pub async fn callback(
         )
         .bind(svc_slug)
         .fetch_optional(&state.pool)
-                .await?;
+        .await?;
         if let Some((svc_id,)) = svc {
             if !crate::grants::is_granted(&state.pool, user_id, svc_id).await? {
                 let pending: Option<(i64,)> = sqlx::query_as(
@@ -598,7 +599,9 @@ pub async fn callback(
                 // bastion checks the session it just created on the very next
                 // request to that host.
                 if let Some(r) = stored.redirect.as_deref() {
-                    if let Some(dest) = crate::proxy::validate_redirect(&state.pool, r, Some(&slug)).await {
+                    if let Some(dest) =
+                        crate::proxy::validate_redirect(&state.pool, r, Some(&slug)).await
+                    {
                         return Ok(Redirect::to(&dest).into_response());
                     }
                 }
@@ -658,7 +661,11 @@ fn legacy_github_id(provider: Provider, provider_id: &str) -> i64 {
 }
 
 async fn pick_available_username(state: &AppState, base: &str) -> AppResult<String> {
-    let candidate = if base.is_empty() { "user".to_string() } else { base.to_string() };
+    let candidate = if base.is_empty() {
+        "user".to_string()
+    } else {
+        base.to_string()
+    };
     let exists: Option<(i64,)> = sqlx::query_as("SELECT id FROM users WHERE username = ?")
         .bind(&candidate)
         .fetch_optional(&state.pool)
@@ -692,8 +699,7 @@ async fn link_identity_and_redirect(
     remote: &RemoteUser,
 ) -> AppResult<Response> {
     // The user must still be signed in as the user they asked to link to.
-    let token = read_session_cookie(cookies)
-        .ok_or_else(|| AppError::Unauthorized)?;
+    let token = read_session_cookie(cookies).ok_or_else(|| AppError::Unauthorized)?;
     let session = crate::session::validate_session_token(&state.pool, &token)
         .await
         .map_err(AppError::Other)?;
@@ -842,7 +848,9 @@ async fn entry(state: &AppState, service_id: i64, return_url: String) -> AppResu
     if !return_url.trim().is_empty() {
         return Ok(Some(Entry::Token(return_url)));
     }
-    Ok(crate::proxy::gated_entry_url(state, service_id).await?.map(Entry::Gated))
+    Ok(crate::proxy::gated_entry_url(state, service_id)
+        .await?
+        .map(Entry::Gated))
 }
 
 pub async fn logout(State(state): State<AppState>, cookies: Cookies) -> AppResult<Response> {

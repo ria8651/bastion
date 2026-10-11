@@ -72,7 +72,11 @@ impl IntoResponse for AppError {
             }
             (bottom_strip(None, true))
         };
-        (status, layout(&format!("{} — bastion", status.as_u16()), body)).into_response()
+        (
+            status,
+            layout(&format!("{} — bastion", status.as_u16()), body),
+        )
+            .into_response()
     }
 }
 

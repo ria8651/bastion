@@ -74,7 +74,10 @@ pub fn client() -> ProxyClient {
             .with_safe_default_protocol_versions()
             .expect("ring supports the default protocol versions");
         match verifier {
-            Some(v) => builder.dangerous().with_custom_certificate_verifier(v).with_no_client_auth(),
+            Some(v) => builder
+                .dangerous()
+                .with_custom_certificate_verifier(v)
+                .with_no_client_auth(),
             None => builder
                 .with_root_certificates(rustls::RootCertStore {
                     roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
@@ -128,7 +131,12 @@ impl rustls::client::danger::ServerCertVerifier for AnyCert {
         cert: &rustls::pki_types::CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
     }
 
     fn verify_tls13_signature(
@@ -137,7 +145,12 @@ impl rustls::client::danger::ServerCertVerifier for AnyCert {
         cert: &rustls::pki_types::CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.0.signature_verification_algorithms)
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
@@ -566,9 +579,18 @@ pub async fn proxy_gate(
     };
 
     if user.status == "denied" {
-        return deny(StatusCode::FORBIDDEN, html.then(|| format!("{}/denied", origin)));
+        return deny(
+            StatusCode::FORBIDDEN,
+            html.then(|| format!("{}/denied", origin)),
+        );
     }
-    let pending = || format!("{}/pending?service={}", origin, urlencoding::encode(&svc.slug));
+    let pending = || {
+        format!(
+            "{}/pending?service={}",
+            origin,
+            urlencoding::encode(&svc.slug)
+        )
+    };
     if user.status != "active" {
         return deny(StatusCode::FORBIDDEN, html.then(pending));
     }
@@ -642,7 +664,10 @@ pub async fn serves_host(state: &AppState, host: &str) -> Result<bool, sqlx::Err
 
 /// Where to send someone into a service gated at the edge: its first exact
 /// hostname, on the scheme and port bastion serves routes on.
-pub async fn gated_entry_url(state: &AppState, service_id: i64) -> Result<Option<String>, sqlx::Error> {
+pub async fn gated_entry_url(
+    state: &AppState,
+    service_id: i64,
+) -> Result<Option<String>, sqlx::Error> {
     let host: Option<(String,)> = sqlx::query_as(
         "SELECT h.host FROM route_hosts h JOIN routes r ON r.id = h.route_id
          WHERE r.service_id = ? AND r.enabled = 1 AND h.host NOT LIKE '*.%'
@@ -652,8 +677,17 @@ pub async fn gated_entry_url(state: &AppState, service_id: i64) -> Result<Option
     .fetch_optional(&state.pool)
     .await?;
     Ok(host.map(|(h,)| {
-        let (scheme, port) = match (&state.edge, state.origin.as_deref().and_then(|o| url::Url::parse(o).ok())) {
-            (Some(edge), _) => ("https".to_string(), (edge.https_port != 443).then_some(edge.https_port)),
+        let (scheme, port) = match (
+            &state.edge,
+            state
+                .origin
+                .as_deref()
+                .and_then(|o| url::Url::parse(o).ok()),
+        ) {
+            (Some(edge), _) => (
+                "https".to_string(),
+                (edge.https_port != 443).then_some(edge.https_port),
+            ),
             (None, Some(o)) => (o.scheme().to_string(), o.port()),
             (None, None) => ("https".to_string(), None),
         };
@@ -665,7 +699,11 @@ pub async fn gated_entry_url(state: &AppState, service_id: i64) -> Result<Option
 }
 
 fn forwarded(state: &AppState, req: &Request, peer: SocketAddr) -> crate::forwarded::Forwarded {
-    let conn = req.extensions().get::<ConnMeta>().copied().unwrap_or_default();
+    let conn = req
+        .extensions()
+        .get::<ConnMeta>()
+        .copied()
+        .unwrap_or_default();
     crate::forwarded::resolve(&state.trusted, peer.ip(), req.headers(), conn)
 }
 
@@ -718,19 +756,14 @@ async fn forward(
         .path_and_query()
         .map(|p| p.as_str())
         .unwrap_or("/");
-    let target: Uri = match format!(
-        "{}{}",
-        hop.upstream.trim_end_matches('/'),
-        path_and_query
-    )
-    .parse()
-    {
-        Ok(u) => u,
-        Err(e) => {
-            tracing::error!(error = ?e, upstream = %hop.upstream, "bad upstream url");
-            return bad_gateway("this app's upstream URL is not valid");
-        }
-    };
+    let target: Uri =
+        match format!("{}{}", hop.upstream.trim_end_matches('/'), path_and_query).parse() {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::error!(error = ?e, upstream = %hop.upstream, "bad upstream url");
+                return bad_gateway("this app's upstream URL is not valid");
+            }
+        };
 
     let upgrade = req.headers().get(header::UPGRADE).cloned();
     let conn_permit = req.extensions().get::<crate::serve::ConnPermit>().cloned();
@@ -1122,7 +1155,10 @@ mod tests {
         assert_eq!(out, "app_sid=abc; theme=dark");
 
         // The app's own cookies must survive, or it can't keep a session.
-        assert_eq!(strip_bastion_cookies("a=1; b=2").as_deref(), Some("a=1; b=2"));
+        assert_eq!(
+            strip_bastion_cookies("a=1; b=2").as_deref(),
+            Some("a=1; b=2")
+        );
         // Nothing left means no header at all, not an empty one.
         assert_eq!(strip_bastion_cookies("bastion_session=x"), None);
         assert_eq!(strip_bastion_cookies(""), None);
@@ -1211,7 +1247,11 @@ mod tests {
             h.append(header::SET_COOKIE, HeaderValue::from_static(c));
         }
         drop_bastion_set_cookies(&mut h);
-        let left: Vec<_> = h.get_all(header::SET_COOKIE).iter().map(|v| v.to_str().unwrap()).collect();
+        let left: Vec<_> = h
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
         assert_eq!(left, vec!["app_sid=1; Path=/", "theme=dark"]);
     }
 
@@ -1229,7 +1269,10 @@ mod tests {
 
     #[test]
     fn header_safe_strips_control_and_non_ascii() {
-        assert_eq!(header_safe("bob\r\nX-Bastion-Sub: forged"), "bobX-Bastion-Sub: forged");
+        assert_eq!(
+            header_safe("bob\r\nX-Bastion-Sub: forged"),
+            "bobX-Bastion-Sub: forged"
+        );
         assert_eq!(header_safe("zoë"), "zo");
         assert_eq!(header_safe(&"x".repeat(9000)).len(), 512);
     }
@@ -1255,7 +1298,13 @@ mod tests {
 
     #[test]
     fn hop_by_hop_headers_are_not_forwarded() {
-        for name in ["connection", "keep-alive", "transfer-encoding", "te", "upgrade"] {
+        for name in [
+            "connection",
+            "keep-alive",
+            "transfer-encoding",
+            "te",
+            "upgrade",
+        ] {
             assert!(is_hop_by_hop(&HeaderName::from_static(name)));
         }
         assert!(!is_hop_by_hop(&HeaderName::from_static("content-type")));
@@ -1285,7 +1334,10 @@ mod tests {
             .header("host", "wrong.example.com")
             .body(Body::empty())
             .unwrap();
-        assert_eq!(request_authority(&h2).as_deref(), Some("app.example.com:8443"));
+        assert_eq!(
+            request_authority(&h2).as_deref(),
+            Some("app.example.com:8443")
+        );
         assert_eq!(request_host(&h2).as_deref(), Some("app.example.com"));
     }
 
@@ -1317,7 +1369,9 @@ mod tests {
         assert!(!wants_html(
             req(&[("upgrade", "websocket"), ("accept", "text/html")]).headers()
         ));
-        assert!(!wants_html(req(&[("accept", "application/json")]).headers()));
+        assert!(!wants_html(
+            req(&[("accept", "application/json")]).headers()
+        ));
     }
 
     #[test]
@@ -1335,7 +1389,10 @@ mod tests {
         assert_eq!(rewrite("http://127.0.0.1:8080"), "https://app.example.com");
         // Relative and third-party locations are left alone.
         assert_eq!(rewrite("/dash"), "/dash");
-        assert_eq!(rewrite("https://accounts.google.com/o"), "https://accounts.google.com/o");
+        assert_eq!(
+            rewrite("https://accounts.google.com/o"),
+            "https://accounts.google.com/o"
+        );
         // Prefix confusion: a host that merely starts with the upstream string.
         assert_eq!(
             rewrite("http://127.0.0.1:80808/evil"),

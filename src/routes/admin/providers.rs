@@ -92,7 +92,9 @@ pub async fn providers_page(
             }))
         }
     };
-    Ok(ctx.page(Nav::Providers, "Identity providers", body).into_response())
+    Ok(ctx
+        .page(Nav::Providers, "Identity providers", body)
+        .into_response())
 }
 
 /// (browse-existing URL, create-new URL) for each provider's OAuth admin console.
@@ -131,7 +133,9 @@ pub async fn providers_save(
     let cid = f.client_id.trim();
     let cs = f.client_secret.trim();
     if cid.is_empty() || cs.is_empty() {
-        return Err(AppError::BadRequest("Both client id and secret are required".into()));
+        return Err(AppError::BadRequest(
+            "Both client id and secret are required".into(),
+        ));
     }
     set_oauth_config(&state.pool, &provider, cid, cs)
         .await
@@ -159,12 +163,11 @@ pub async fn providers_clear(
     }
 
     // Don't let admins wipe out the very last provider.
-    let (other_count,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM oauth_providers WHERE enabled = 1 AND provider != ?",
-    )
-    .bind(&provider)
-    .fetch_one(&state.pool)
-    .await?;
+    let (other_count,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM oauth_providers WHERE enabled = 1 AND provider != ?")
+            .bind(&provider)
+            .fetch_one(&state.pool)
+            .await?;
     if other_count == 0 {
         return Err(AppError::BadRequest(
             "can't clear the last enabled provider — nobody could sign in".into(),

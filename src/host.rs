@@ -54,7 +54,7 @@ pub fn of_url(url: &str) -> Option<String> {
     url::Url::parse(url)
         .ok()?
         .host_str()
-        .map(|h| bare(h))
+        .map(bare)
         .filter(|h| !h.is_empty())
 }
 
@@ -86,7 +86,10 @@ mod tests {
 
     #[test]
     fn validate_rejects_unusable_names() {
-        assert_eq!(validate("App.Example.com", "host").unwrap(), "app.example.com");
+        assert_eq!(
+            validate("App.Example.com", "host").unwrap(),
+            "app.example.com"
+        );
         assert!(validate("", "host").is_err());
         assert!(validate("bad host.com", "host").is_err());
         assert!(validate("under_score.com", "host").is_err());
@@ -94,8 +97,14 @@ mod tests {
 
     #[test]
     fn of_url_extracts_a_comparable_host() {
-        assert_eq!(of_url("https://App.Example.com:443/x").as_deref(), Some("app.example.com"));
-        assert_eq!(of_url("http://app.example.com.").as_deref(), Some("app.example.com"));
+        assert_eq!(
+            of_url("https://App.Example.com:443/x").as_deref(),
+            Some("app.example.com")
+        );
+        assert_eq!(
+            of_url("http://app.example.com.").as_deref(),
+            Some("app.example.com")
+        );
         assert_eq!(of_url("not a url"), None);
     }
 
