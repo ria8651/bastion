@@ -11,7 +11,7 @@ COPY static ./static
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/app/target,sharing=locked \
+    --mount=type=cache,target=/app/target,id=bastion-target,sharing=locked \
     cargo build --release && \
     cp target/release/bastion /bastion
 
