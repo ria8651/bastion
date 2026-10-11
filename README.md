@@ -1,54 +1,52 @@
-# bastion
+<h1 align="center">bastion</h1>
 
-Central SSO auth service for my self-hosted apps. GitHub and/or Google OAuth. axum + sqlx (SQLite) + maud + htmx, single static binary.
+<p align="center">
+  Single sign-on and a TLS edge for self-hosted apps.<br>
+  Sign in once with GitHub or Google, and decide who gets into what.
+</p>
 
-Apps integrate either by **verifying a JWT** (the app knows about bastion) or by being **reverse-proxied** by bastion (the app knows nothing at all — see [Gating an app that knows nothing about bastion](#gating-an-app-that-knows-nothing-about-bastion)).
+<p align="center">
+  <img src="docs/screenshots/overview.png" alt="bastion admin overview: pending service registrations, access requests with approve/deny, and stats" width="900">
+</p>
 
-## Status
+bastion sits in front of the apps on your box. People sign in with GitHub or Google, ask for access to an app, and you approve or deny them from one admin panel. Apps get the signed-in user either as a **signed JWT** (if they want to know about bastion) or as **plain headers** on a proxied request (if they don't). bastion can also terminate TLS and route every hostname on the box, so it can replace nginx or Caddy.
 
-- ✅ **Phase 1** — GitHub OAuth, sessions, whitelist/pending/denied user states
-- ✅ **Phase 2** — Admin panel: users, access requests, service CRUD, audit log
-- ✅ **Phase 3** — RS256 JWT + JWKS + `/api/introspect` for consumer verification
-- ✅ **First-run setup wizard** — no env-based bootstrap
-- ✅ **Google OAuth** — multi-provider identities, `/account` link/unlink
-- ✅ **Phase 4** — Fine-grained per-service permissions
-- ✅ **Gated routes** — bastion reverse-proxies and gates apps that know nothing about it
+It's a single Rust binary and a SQLite file. Everything apart from ports and certificates is configured in the browser.
 
-## Run (dev)
+## Features
 
-```bash
-cargo run
-```
+- **GitHub and Google sign-in.** Use either or both. A user can link several identities to one account, and apps always see the same stable user id.
+- **Access requests.** New users ask for an app and an admin approves or denies them. Revoking access takes effect on the next request.
+- **Gate any app.** Put a route in front of something that has never heard of bastion (Grafana, Jellyfin, Paperless, Home Assistant). Only granted users get through, and the app receives `Remote-User` / `X-Bastion-User` headers.
+- **Or integrate properly.** Apps that verify bastion's RS256 JWT get per-service **permissions** they declare themselves, with defaults and per-user overrides.
+- **Edge mode.** Terminate TLS, route hostnames and `*.wildcards` to upstreams (http or https, self-signed allowed), and keep some routes open and others gated. Certificates hot-reload when your DNS-01 client renews them.
+- **Built for a phone.** The admin panel is responsive, so you can approve a request from the couch.
+- **Setup wizard.** No config files. Start it, open it, and follow three steps.
 
-Open <http://localhost:5180> → complete the setup wizard (OAuth creds → claim admin → add services). The binary creates the SQLite file and runs `migrations/*.sql` via `sqlx::migrate!` on startup.
+## Screenshots
 
-## Env vars
+| | |
+|---|---|
+| <img src="docs/screenshots/login.png" alt="Sign-in page continuing to Jellyfin"> | <img src="docs/screenshots/launcher.png" alt="Launcher showing the apps a user has access to"> |
+| **Sign in** once, on bastion's own hostname | **Your apps**: everything you've been granted |
+| <img src="docs/screenshots/routes.png" alt="Routes list with open, gated, disabled and unverified-TLS routes"> | <img src="docs/screenshots/route-detail.png" alt="Route editor with hostnames, upstream, gate and public paths"> |
+| **Routes**: hostnames to upstreams, open or gated | **A route**: wildcards, public paths, https upstreams |
+| <img src="docs/screenshots/user-detail.png" alt="User page with service grants and per-permission toggles"> | <img src="docs/screenshots/setup.png" alt="First-run setup wizard, step 1: identity providers"> |
+| **Users**: grants and fine-grained permissions | **First run**: a three-step wizard |
 
-| Var | Default | Purpose |
-|---|---|---|
-| `DATABASE_PATH` | `./data/bastion.db` | SQLite file path |
-| `ORIGIN` | (derived from request headers) | Public-facing URL, e.g. `https://auth.example.com`. Set behind a reverse proxy if it doesn't forward `X-Forwarded-{Host,Proto}`. |
-| `PORT` | `5180` | Plaintext listen port. Always on, edge mode or not. |
-| `TLS_CERT`, `TLS_KEY` | (unset) | PEM certificate chain and key. Setting both makes bastion the edge: TLS on `HTTPS_PORT`, a redirect on `HTTP_PORT`. Requires `ORIGIN`. Re-read within a minute when the files change. |
-| `HTTPS_PORT` | `443` | TLS listener, edge mode only |
-| `HTTP_PORT` | `80` | Redirects known hosts to https, edge mode only. `off` to disable. |
-| `TRUSTED_PROXIES` | `none` in edge mode, else loopback + private ranges | Comma-separated IPs/CIDRs whose `X-Forwarded-{For,Proto}` are believed, or `none` |
-| `RUST_LOG` | `info,sqlx=warn,tower_http=info` | Tracing filter |
+<p align="center">
+  <img src="docs/screenshots/mobile-requests.png" alt="Access requests on a phone" width="300">
+</p>
 
-Everything else — OAuth credentials, services, the session cookie domain — lives in the database and is managed from `/setup` and `/admin`.
-
-## Run (Docker)
-
-Multi-stage build → ~10 MB image with a single static binary inside.
+## Quick start
 
 ```yaml
+# compose.yaml
 services:
   bastion:
-    build:
-      context: https://github.com/ria8651/bastion.git#main
+    image: ghcr.io/ria8651/bastion:latest   # amd64 + arm64
     environment:
-      DATABASE_PATH: /data/bastion.db
-      ORIGIN: https://auth.yourdomain.com
+      ORIGIN: https://auth.example.com
     volumes:
       - bastion_data:/data
     ports:
@@ -58,106 +56,95 @@ volumes:
   bastion_data:
 ```
 
-Either terminate TLS at nginx/Caddy and proxy to `127.0.0.1:5180` with `X-Forwarded-Proto` + `X-Forwarded-Host` set (or pin `ORIGIN` explicitly), or let bastion be the edge — see below.
+```sh
+docker compose up -d
+```
+
+Open bastion and the setup wizard walks you through it:
+
+1. **Connect a provider.** Create a GitHub OAuth app and/or a Google OAuth client. The wizard shows the exact callback URL to paste in.
+2. **Claim admin.** Sign in with the provider you just connected to become the first admin.
+3. **Add services.** Add the apps people can request access to.
+
+This runs bastion behind an existing reverse proxy that terminates TLS and forwards `X-Forwarded-Proto`/`X-Forwarded-Host`, or set `ORIGIN` as above. To have bastion do TLS itself, see [Edge mode](#edge-mode).
+
+## Putting apps behind it
+
+A **service** is who may get in: a name, grants, access requests and a launcher tile. A **route** is where traffic goes: hostnames and an upstream. An app can use either or both.
+
+### Option A: gate an app that knows nothing about bastion
+
+No code changes in the app. bastion answers on the app's hostname, checks the session and the grant, and forwards the request with the user attached:
+
+| Header | Value |
+|---|---|
+| `X-Bastion-User`, `Remote-User` | username |
+| `X-Bastion-Email`, `Remote-Email` | email |
+| `X-Bastion-Sub` | stable user id (same as the JWT `sub`) |
+
+To set one up:
+
+1. In **Settings**, set a **session cookie domain** covering bastion and the app (e.g. `example.com`), and pin `ORIGIN`.
+2. **Services → New service** (no return URL needed).
+3. **Routes → New route**: hostname `grafana.example.com`, upstream `http://192.168.1.20:3000`, access *gated by* that service. Point the DNS at bastion.
+
+Clients can't forge these headers. bastion builds the outbound headers from scratch and drops anything named `X-Bastion-*` or `Remote-*` from the incoming request. bastion's own session cookie is stripped too, so the app never sees it. Health checks and webhooks can skip the gate with **public paths** (`/health`, `/api/hooks/*`).
+
+### Option B: verify bastion's JWT
+
+For apps you write yourself, when you want permissions:
+
+1. Send signed-out users to `https://auth.example.com/auth/login?service=<slug>`.
+2. bastion signs them in, checks the grant, and redirects to the service's return URL with `?bastion_token=<JWT>`.
+3. Verify the token against `/.well-known/jwks.json` (RS256). Check `iss`, and `aud` = `svc` = your slug. Then start your own session.
+
+Claims: `sub`, `username`, `perms[]`, `bastion_uid`, `aud`, `svc`, `iss`, `iat`, `exp`, `jti`. For checks that must notice a revocation before the token expires, call `GET /api/introspect` with `Authorization: Bearer <jwt>`.
+
+An app can **register itself** on first boot by posting its public key and permission catalog to `/api/services/register`. It then shows up in the admin panel for approval.
 
 ## Edge mode
 
-Set `TLS_CERT` + `TLS_KEY` (and publish 80 and 443) and bastion terminates TLS itself, routing every hostname from the database. **Routes** (`/admin/routes`) map hostnames — `media.example.com` or `*.apps.example.com` — to an upstream like `http://192.168.1.8:8096`, or an `https://` one, optionally accepting a self-signed certificate. A route is open, or gated by a service.
+Set `TLS_CERT` and `TLS_KEY`, publish ports 80 and 443, and bastion becomes the front door for the whole box:
 
-bastion doesn't issue certificates. Point it at whatever your DNS-01 client or private CA writes, and it picks up renewals without a restart. It holds port 80 and redirects everything, so HTTP-01 challenges (certbot webroot or standalone) can't be answered — renew with DNS-01; a renewal that fails to parse keeps the old pair serving, and the settings page shows the expiry. A deploy restarts the edge, so connections drop.
-
-## Integrating a service
-
-Services redirect unauthenticated users to:
-
-```
-https://auth.yourdomain.com/auth/login?service=<slug>
-```
-
-bastion authenticates via GitHub, checks the grant, and redirects back to the service's **registered Return URL** with `?bastion_token=<JWT>` appended — or to `/pending` if the user needs admin approval.
-
-The consumer app:
-
-1. Registers the full return URL (e.g. `https://binkflix.yourdomain.com/auth/bastion`) via bastion's admin panel.
-2. Verifies the token using the JWKS at `/.well-known/jwks.json`, checking `iss`, `aud = <slug>`, and `svc = <slug>`.
-3. Mints its own session cookie and redirects to the app root.
-
-Fresh grant/perm state is available via `GET /api/introspect` with an `Authorization: Bearer <jwt>` header — useful for revocation-sensitive checks that shouldn't wait for JWT expiry.
-
-## Gating an app that knows nothing about bastion
-
-Put a **route** in front of it, gated by a service, and bastion serves the app's hostname itself: it checks the session and the grant, then forwards upstream with the caller's identity attached as headers. No gateway config, no auth code in the app.
-
-Setup:
-
-1. **Set a session cookie domain** in *Settings* (e.g. `example.com`). Sign-in happens on bastion's own hostname, so a host-only cookie is never sent to the app. This is required, not advisory — without it a gated host answers 503 rather than bouncing the browser between bastion and the app forever. It must cover bastion's own host, which is checked when you save it. Use a domain you control end to end; every host under it receives the token.
-2. **Pin `ORIGIN`**, since a gated request's `Host` is the app's hostname, not bastion's.
-3. **Create a service** (no return URL needed) — it's who may get in — then **add a route** with the app's hostname and upstream (`http://127.0.0.1:8080`), gated by that service. Point the hostname's DNS at bastion.
-
-The app receives `X-Bastion-User`, `-Sub` (the same stable `sub` as the JWT) and `-Email`, plus `Remote-User`/`Remote-Email` for off-the-shelf apps that already read those. It's free to ignore all of them; the gate has already happened.
-
-No permissions are sent. A permission catalog is declared by the service through `/api/services/register`, which an app behind a gated route can't do — so the gate is just the grant, and per-service permissions travel in the JWT only.
-
-Three things worth knowing. **Forged identity headers are impossible by construction** — the outbound header map is built from scratch and bastion's whole header namespace is dropped from the inbound request, with no configuration involved. **Revocation is immediate**, because every request re-reads the session and the grant. And **bastion is now in the data path**: bodies stream rather than buffer, WebSockets and other `Upgrade` protocols are spliced through, but bastion's uptime is the app's uptime.
-
-Per-service *public paths* skip auth entirely for health probes and webhooks; `*` matches any run of characters (`/health`, `/api/hooks/*`).
-
-## Data model
-
-```
-users            github-linked accounts, status: active|pending|denied, is_admin flag
-services         who may get in: slug, grants; return_url ('' = none) for JWT apps
-routes           hostnames → upstream (tls_skip_verify, enabled); service_id gates, public_paths skip the gate
-route_hosts      one row per hostname or *.wildcard a route answers on
-grants           which users can access which services
-permissions      per-service permission keys (unused until phase 4)
-user_perms       fine-grained permission assignments
-sessions         opaque bastion session tokens, sha256-hashed
-access_requests  audit trail for "user X wants into service Y", admin-resolved
-oauth_providers  github/google client id + secret (managed by setup wizard)
-settings         instance-wide config; currently the session cookie domain
-signing_keys     RS256 keypairs for service-bound JWTs (auto-generated, rotatable)
-audit_log        admin actions
+```yaml
+    environment:
+      ORIGIN: https://auth.example.com
+      TLS_CERT: /certs/fullchain.pem
+      TLS_KEY: /certs/privkey.pem
+    volumes:
+      - bastion_data:/data
+      - /etc/letsencrypt/live/example.com:/certs:ro
+    ports:
+      - "80:80"
+      - "443:443"
 ```
 
-## Source layout
+- Routes match the exact hostname first, then the most specific `*.wildcard`.
+- WebSockets, SSE and other `Upgrade` connections are passed through. Bodies are streamed, not buffered.
+- Upstreams can be `https://`, optionally accepting a self-signed certificate.
+- Port 80 redirects to https for any hostname bastion serves.
 
-```
-src/
-  main.rs           router + middleware + listener
-  state.rs          AppState, origin/secure helpers
-  error.rs          AppError -> HTML error page
-  db.rs             sqlite pool + sqlx migrations
-  models.rs         User, Service, UserCtx, ...
-  session.rs        token gen, sha256 store, sliding renewal, cookie scoping
-  settings.rs       instance-wide key/value config
-  proxy.rs          reverse proxy for routes: gate, header injection, upgrades
-  edge.rs           route lookup (exact, then wildcards), hostname + upstream validation
-  forwarded.rs      TRUSTED_PROXIES, real client IP, scheme
-  serve.rs          plaintext / TLS / redirect listeners on hyper
-  tls.rs            cert pair from disk, hot reload
-  host.rs           hostname normalisation + cookie-domain containment
-  grants.rs         "is this user allowed into this service"
-  oauth.rs          GitHub OAuth (authorize URL, code exchange, /user fetch)
-  keys.rs           RS256 keypair gen, JWK persistence
-  jwt.rs            identity_hash, issue_service_token, verify_service_token
-  audit.rs          audit_log insert helper
-  setup.rs          setup-state derivation + oauth_providers CRUD
-  middleware.rs     load_user, setup_gate, require_admin
-  templates.rs      maud layout + admin_layout + status_pill
-  routes/
-    home.rs         GET /, /pending, /denied
-    auth.rs         /auth/login (GET+POST), /auth/callback, /auth/logout
-    setup.rs        /setup wizard + actions
-    admin.rs        /admin/* (overview, requests, users, services + actions)
-    jwks.rs         /.well-known/jwks.json
-    introspect.rs   /api/introspect
-static/
-  style.css         inlined into pages via include_str!
+bastion doesn't issue certificates. Point it at whatever your DNS-01 client (or private CA) writes and it picks up renewals within a minute, with no restart. **Renewals must use DNS-01**, because bastion holds port 80 and redirects everything, so HTTP-01 challenges never reach a webroot. If a renewed pair fails to load, the old one keeps serving and the error shows on the settings page.
+
+## Configuration
+
+Listeners and TLS are set through the environment, so a mistake there can't lock you out of the admin UI you'd need to fix it. Everything else lives in the database.
+
+| Variable | Default | |
+|---|---|---|
+| `ORIGIN` | from request headers | bastion's public URL, e.g. `https://auth.example.com`. Required for gated routes and edge mode. |
+| `DATABASE_PATH` | `./data/bastion.db` (`/data/bastion.db` in Docker) | SQLite file |
+| `PORT` | `5180` | Plaintext HTTP listener, always on |
+| `TLS_CERT`, `TLS_KEY` | | PEM chain and key. Setting both enables edge mode. |
+| `HTTPS_PORT` | `443` | Edge mode only |
+| `HTTP_PORT` | `80` | Edge mode only. Redirects to https. `off` disables it. |
+| `TRUSTED_PROXIES` | `none` in edge mode, otherwise loopback + private ranges | IPs/CIDRs whose `X-Forwarded-*` headers are believed |
+| `RUST_LOG` | `info,sqlx=warn,tower_http=info` | Log filter |
+
+## Development
+
+```sh
+cargo run    # http://localhost:5180
 ```
 
-## Templating
-
-Pages are async handlers that return `maud::Markup`. Layouts compose via plain function calls — `templates::layout(title, user, body)` or `templates::admin_layout(title, tab, user, body)`. No `.html` files, no template inheritance, no client-side framework.
-
-`<body hx-boost="true">` makes all links + forms XHR-driven swaps of the body; the server still does full server-side rendering on every request. Mutation handlers do their work and return `303 See Other` to the relevant GET page; the browser re-fetches it. No JSON API for the UI.
+Migrations in `migrations/` run on startup. The stack is axum, sqlx (SQLite), maud templates, htmx and josekit, with no JS build step. [`CLAUDE.md`](CLAUDE.md) has the architecture notes and the security invariants behind the proxy.
