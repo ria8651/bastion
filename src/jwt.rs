@@ -36,11 +36,12 @@ pub struct IssueArgs<'a> {
     pub username: &'a str,
     pub service: &'a str,
     pub perms: Vec<String>,
+    /// Set for a token minted for a paired device rather than a browser.
+    pub device: Option<i64>,
 }
 
 pub struct IssuedToken {
     pub jwt: String,
-    #[allow(dead_code)]
     pub expires_at: i64,
 }
 
@@ -83,6 +84,11 @@ pub async fn issue_service_token(pool: &SqlitePool, args: IssueArgs<'_>) -> Resu
             Some(Value::Number(serde_json::Number::from(args.user_id))),
         )
         .map_err(|e| anyhow!("set bastion_uid: {}", e))?;
+    if let Some(id) = args.device {
+        payload
+            .set_claim("device_id", Some(Value::Number(id.into())))
+            .map_err(|e| anyhow!("set device_id: {}", e))?;
+    }
 
     let signer = RS256
         .signer_from_jwk(&key.private_jwk)

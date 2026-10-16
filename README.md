@@ -19,6 +19,7 @@ It's a single Rust binary and a SQLite file. Everything apart from ports and cer
 - **Access requests.** New users ask for an app and an admin approves or denies them. Revoking access takes effect on the next request.
 - **Gate any app.** Put a route in front of something that has never heard of bastion (Grafana, Jellyfin, Paperless, Home Assistant). Only granted users get through, and the app receives `Remote-User` / `X-Bastion-User` headers.
 - **Or integrate properly.** Apps that verify bastion's RS256 JWT get per-service **permissions** they declare themselves, with defaults and per-user overrides.
+- **TV and CLI sign-in.** Apps with no browser of their own show a code (or a QR code), and someone confirms it on their phone. The device gets the same JWT a browser would, and can be signed out from the account page.
 - **Edge mode.** Terminate TLS, route hostnames and `*.wildcards` to upstreams (http or https, self-signed allowed), and keep some routes open and others gated. Certificates hot-reload when your DNS-01 client renews them.
 - **Built for a phone.** The admin panel is responsive, so you can approve a request from the couch.
 - **Setup wizard.** No config files. Start it, open it, and follow three steps.
@@ -99,6 +100,17 @@ For apps you write yourself, when you want permissions:
 3. Verify the token against `/.well-known/jwks.json` (RS256). Check `iss`, and `aud` = `svc` = your slug. Then start your own session.
 
 Claims: `sub`, `username`, `perms[]`, `bastion_uid`, `aud`, `svc`, `iss`, `iat`, `exp`, `jti`. For checks that must notice a revocation before the token expires, call `GET /api/introspect` with `Authorization: Bearer <jwt>`.
+
+### Devices without a browser
+
+A TV app or CLI can't run an OAuth redirect, so it signs in on someone's phone instead, using the OAuth device flow ([RFC 8628](https://www.rfc-editor.org/rfc/rfc8628)). Turn on **Device sign-in** on the service's admin page first; it's off by default.
+
+1. `POST /api/device/code` with `client_id=<slug>&name=Living Room TV` (form-encoded). You get back a `user_code`, a `verification_uri_complete` to show as a QR code, a `device_code` and a polling `interval`.
+2. The user opens `/device` on their phone, signs in, checks the code and confirms.
+3. Meanwhile, poll `POST /api/device/token` with `grant_type=urn:ietf:params:oauth:grant-type:device_code&client_id=<slug>&device_code=…`. It answers `authorization_pending` until the user confirms, then returns an `access_token` (the usual JWT, with an extra `device_id` claim) and a `refresh_token`.
+4. Send the JWT as `Authorization: Bearer`. Before it expires (15 minutes), swap the refresh token for a new one with `grant_type=refresh_token&client_id=<slug>&refresh_token=…`.
+
+Every refresh re-checks the user, the grant and the permissions, so revoking any of them reaches the device within one token lifetime. `/api/introspect` reports a signed-out device straight away. Devices unused for 90 days have to pair again.
 
 An app can **register itself** on first boot by posting its public key and permission catalog to `/api/services/register`. It then shows up in the admin panel for approval.
 

@@ -192,12 +192,15 @@ pub async fn user_detail(
     .fetch_one(&state.pool)
     .await?;
 
+    let devices = crate::device::list_for_user(&state.pool, id).await?;
+
     let id_s = id.to_string();
     let here = format!("/admin/users/{}", id);
     let granted_n = services.iter().filter(|s| s.4).count();
     let grant_action = format!("/admin/users/{}/toggle-grant", id);
     let perm_action = format!("/admin/users/{}/toggle-perm", id);
     let revoke_action = format!("/admin/users/{}/revoke-sessions", id);
+    let revoke_device_action = format!("/admin/users/{}/revoke-device", id);
 
     let body = html! {
         (back("/admin/users", "Users"))
@@ -271,17 +274,22 @@ pub async fn user_detail(
                     div.row-body {
                         div.main {
                             div.t { "Sessions" }
-                            div.s { (active_sessions) " active" }
+                            div.s {
+                                (active_sessions) " active"
+                                @if !devices.is_empty() {
+                                    " · " (devices.len()) (if devices.len() == 1 { " device" } else { " devices" })
+                                }
+                            }
                         }
                     }
-                    @if active_sessions > 0 {
+                    @if active_sessions > 0 || !devices.is_empty() {
                         div.end {
                             (Post::new(&revoke_action, "Sign out everywhere")
                                 .class("btn sm bad")
                                 .confirm(if is_self {
-                                    "Revoke all your sessions? That includes this one — you'll be signed out."
+                                    "Revoke all your sessions and devices? That includes this one — you'll be signed out."
                                 } else {
-                                    "Revoke all of this user's sessions? They'll have to sign in again."
+                                    "Revoke all of this user's sessions and devices? They'll have to sign in again."
                                 })
                                 .render())
                         }
@@ -377,6 +385,36 @@ pub async fn user_detail(
                 }
             }
         }))
+
+        @if !devices.is_empty() {
+            (section("Devices", Some(devices.len()), None, html! {
+                div.list {
+                    @for d in &devices {
+                        @let did = d.id.to_string();
+                        div.row {
+                            span.lead { (tile(&d.slug, "")) }
+                            div.row-body {
+                                div.main {
+                                    div.t { (d.name) }
+                                    div.s { (d.slug) " · paired " (rel_time(d.created_at)) }
+                                }
+                                div.meta {
+                                    span title=(format!("paired {}", fmt_time(d.created_at))) {
+                                        "used " (d.last_used_at.map(rel_time).unwrap_or_else(|| "never".into()))
+                                    }
+                                }
+                            }
+                            div.end {
+                                (Post::new(&revoke_device_action, "Revoke").class("btn sm bad")
+                                    .fields(&[("device_id", &did)])
+                                    .confirm("Sign this device out? It will have to be paired again.")
+                                    .stay().render())
+                            }
+                        }
+                    }
+                }
+            }))
+        }
 
         @if !requests.is_empty() {
             (section("Access requests", Some(requests.len()), None, html! {
@@ -624,12 +662,37 @@ pub async fn revoke_sessions(
         .bind(uid)
         .execute(&state.pool)
         .await?;
+    let devices = crate::device::revoke_all_for_user(&state.pool, uid).await?;
     audit(
         &state.pool,
         Some(admin.id),
         "session.revoke_all",
         Some(&format!("user:{}", uid)),
-        None,
+        (devices > 0).then(|| serde_json::json!({ "devices": devices })),
+    )
+    .await
+    .map_err(AppError::Other)?;
+    Ok(Redirect::to(&format!("/admin/users/{}", uid)).into_response())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RevokeDeviceForm {
+    pub device_id: i64,
+}
+
+pub async fn revoke_device(
+    State(state): State<AppState>,
+    Path(uid): Path<i64>,
+    user: Option<Extension<UserCtx>>,
+    Form(f): Form<RevokeDeviceForm>,
+) -> AppResult<Response> {
+    let admin = admin(user)?;
+    crate::device::revoke(
+        &state.pool,
+        f.device_id,
+        Some(uid),
+        Some(admin.id),
+        "device.revoke",
     )
     .await
     .map_err(AppError::Other)?;

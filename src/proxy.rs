@@ -603,7 +603,8 @@ pub async fn proxy_gate(
             // subresource of every page, and one gated page load would
             // otherwise produce a burst of identical rows.
             if html {
-                let _ = record_access_request(&state.pool, user.id, svc.id, &svc.slug).await;
+                let note = format!("Requested via proxy on {}", svc.slug);
+                let _ = crate::grants::request_access(&state.pool, user.id, svc.id, &note).await;
             }
             return deny(StatusCode::FORBIDDEN, html.then(pending));
         }
@@ -705,33 +706,6 @@ fn forwarded(state: &AppState, req: &Request, peer: SocketAddr) -> crate::forwar
         .copied()
         .unwrap_or_default();
     crate::forwarded::resolve(&state.trusted, peer.ip(), req.headers(), conn)
-}
-
-/// Mirrors the access request the OAuth callback files on a service redirect,
-/// so an app reached directly still shows up in the admin requests queue.
-async fn record_access_request(
-    pool: &SqlitePool,
-    user_id: i64,
-    service_id: i64,
-    slug: &str,
-) -> Result<(), sqlx::Error> {
-    let existing: Option<(i64,)> = sqlx::query_as(
-        "SELECT id FROM access_requests
-         WHERE user_id = ? AND service_id = ? AND resolved_at IS NULL",
-    )
-    .bind(user_id)
-    .bind(service_id)
-    .fetch_optional(pool)
-    .await?;
-    if existing.is_none() {
-        sqlx::query("INSERT INTO access_requests (user_id, service_id, note) VALUES (?, ?, ?)")
-            .bind(user_id)
-            .bind(service_id)
-            .bind(format!("Requested via proxy on {}", slug))
-            .execute(pool)
-            .await?;
-    }
-    Ok(())
 }
 
 // ──────────────────────── forwarding ────────────────────────

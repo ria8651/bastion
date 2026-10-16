@@ -91,7 +91,18 @@ Turning the setting on with sessions already live is the case to watch. `middlew
 
 ## Wire contract (services with a `return_url`)
 
-Services redirect unauthenticated users to `${BASTION}/auth/login?service=<slug>`. bastion authenticates via whichever provider the user picked, checks the grant, and redirects to the service's registered Return URL with `?bastion_token=<RS256 JWT>` appended. Consumers verify via `/.well-known/jwks.json` or call `GET /api/introspect` for live revocation-sensitive checks. JWT claims: `sub` (stable identity hash derived from the user's frozen sub anchor), `iss`, `aud=<slug>`, `svc=<slug>`, `username`, `perms[]`, `bastion_uid`, `exp`, `iat`, `jti`.
+Services redirect unauthenticated users to `${BASTION}/auth/login?service=<slug>`. bastion authenticates via whichever provider the user picked, checks the grant, and redirects to the service's registered Return URL with `?bastion_token=<RS256 JWT>` appended. Consumers verify via `/.well-known/jwks.json` or call `GET /api/introspect` for live revocation-sensitive checks. JWT claims: `sub` (stable identity hash derived from the user's frozen sub anchor), `iss`, `aud=<slug>`, `svc=<slug>`, `username`, `perms[]`, `bastion_uid`, `exp`, `iat`, `jti`, plus `device_id` on tokens minted for a paired device.
+
+### Device sign-in (RFC 8628)
+
+For clients with no browser (the binkflix Apple TV app). `src/device.rs` holds the grant; `src/routes/device.rs` the HTTP side. The device calls `POST /api/device/code` and polls `POST /api/device/token` (both form-encoded, RFC-shaped errors); a person confirms at `/device` on their phone. Pairing yields a refresh token, which the device swaps for the same JWT a browser gets. Invariants:
+
+- **Off per service** (`services.device_login`). The client is public, so anyone can start a pairing for any slug, and the confirm page is the only defence against a phished code. It names the device and service and always needs a click, even with the code prefilled from the QR.
+- **Refresh re-derives everything.** User active, service live and still `device_login`, grant held, current perms. Nothing is copied at pairing time, so a revocation reaches the device within one JWT lifetime. `/api/introspect` checks `devices.revoked_at` for an instant answer. Losing the grant doesn't revoke the device, so restoring the grant brings it back.
+- **Refresh tokens don't rotate.** A TV that lost a rotation response would be locked out. They're stored hashed, with a 90-day idle expiry.
+- **Codes are single-use, and taking them is atomic.** The approving poll `DELETE … RETURNING`s the `device_codes` row, so two racing polls can't both mint a device.
+- **No unauthenticated code oracle.** Signed out, `/device` only carries the code through login (`OAuthState.device`) and never looks it up. Signed in, wrong codes are counted per user, in memory, and refused past 10 per 10 minutes.
+- "Sign out everywhere" on the admin user page revokes devices too.
 
 ## Phase status
 
@@ -103,3 +114,4 @@ Services redirect unauthenticated users to `${BASTION}/auth/login?service=<slug>
 - Phase 4 (fine-grained per-service permissions) ✅
 - Proxy mode (bastion reverse-proxies gated apps; identity as headers) ✅
 - Edge mode (TLS termination, routes open or gated, trusted-proxy forwarding) ✅
+- Device sign-in (RFC 8628 device flow, refresh tokens, per-service opt-in) ✅

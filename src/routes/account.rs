@@ -48,6 +48,8 @@ pub async fn page(
             .await?;
     let linked_providers: std::collections::HashSet<String> =
         identities.iter().map(|i| i.1.clone()).collect();
+    let devices = crate::device::list_for_user(&state.pool, user.id).await?;
+
     let linkable: Vec<String> = configured
         .into_iter()
         .map(|(p,)| p)
@@ -139,12 +141,32 @@ pub async fn page(
                 }
             }
 
+            @if !devices.is_empty() {
+                h2 style="font-size:14px;margin-top:32px;margin-bottom:12px;font-family:var(--font-mono);color:var(--fg-mute);text-transform:uppercase;letter-spacing:0.06em" { "Signed-in devices" }
+                div.setup-rows {
+                    @for d in &devices {
+                        div.setup-row.configured {
+                            div.body {
+                                div.label { (d.name) }
+                                div.detail.mono {
+                                    (d.slug) " · signed in " (crate::routes::admin::rel_time(d.created_at))
+                                    @if let Some(t) = d.last_used_at { " · last used " (crate::routes::admin::rel_time(t)) }
+                                }
+                            }
+                            form method="post" action="/account/devices/revoke" style="margin:0" {
+                                input type="hidden" name="id" value=(d.id);
+                                button.btn.danger type="submit" { "Sign out" }
+                            }
+                        }
+                    }
+                }
+            }
+
             (anchor_note(&user))
         }
         (bottom_strip(None, true))
     };
 
-    let _ = state;
     Ok(layout("Account", body).into_response())
 }
 
@@ -207,6 +229,7 @@ pub async fn link_post(
             claim_admin: None,
             link_to_user_id: Some(user.id),
             redirect: None,
+            device: None,
         },
         is_secure(&state, &headers),
     );

@@ -37,7 +37,7 @@ pub struct LoginQuery {
 /// Filters out soft-deleted permissions (`removed_at IS NOT NULL`) so a key
 /// the service dropped from its catalog doesn't leak into freshly issued
 /// tokens.
-async fn load_user_perms(
+pub async fn load_user_perms(
     pool: &SqlitePool,
     user_id: i64,
     service_id: i64,
@@ -269,6 +269,8 @@ pub struct LoginForm {
     pub claim_admin: Option<String>,
     pub provider: String,
     pub redirect: Option<String>,
+    /// Set by `/device`: the pairing code to come back and confirm.
+    pub device: Option<String>,
 }
 
 pub async fn login_post(
@@ -318,6 +320,10 @@ pub async fn login_post(
             claim_admin: if claim_admin { Some(true) } else { None },
             link_to_user_id: None,
             redirect,
+            device: f
+                .device
+                .as_deref()
+                .and_then(crate::device::normalize_user_code),
         },
         is_secure(&state, &headers),
     );
@@ -518,25 +524,8 @@ pub async fn callback(
         .await?;
         if let Some((svc_id,)) = svc {
             if !crate::grants::is_granted(&state.pool, user_id, svc_id).await? {
-                let pending: Option<(i64,)> = sqlx::query_as(
-                    "SELECT id FROM access_requests
-                     WHERE user_id = ? AND service_id = ? AND resolved_at IS NULL",
-                )
-                .bind(user_id)
-                .bind(svc_id)
-                .fetch_optional(&state.pool)
-                .await?;
-                if pending.is_none() {
-                    sqlx::query(
-                        "INSERT INTO access_requests (user_id, service_id, note)
-                         VALUES (?, ?, ?)",
-                    )
-                    .bind(user_id)
-                    .bind(svc_id)
-                    .bind(format!("Requested via login redirect from {}", svc_slug))
-                    .execute(&state.pool)
-                    .await?;
-                }
+                let note = format!("Requested via login redirect from {}", svc_slug);
+                crate::grants::request_access(&state.pool, user_id, svc_id, &note).await?;
             }
         }
     }
@@ -584,6 +573,12 @@ pub async fn callback(
         return Ok(Redirect::to(&redir).into_response());
     }
 
+    // Signed in to approve a device: back to its confirm page, which does the
+    // grant check itself.
+    if let Some(code) = stored.device.as_deref() {
+        return Ok(Redirect::to(&crate::device::confirm_path(code)).into_response());
+    }
+
     // Active user — if a service redirect, mint a token from the frozen sub anchor.
     if let Some(svc_slug) = stored.service.as_deref() {
         let svc: Option<(i64, String, String)> = sqlx::query_as(
@@ -628,6 +623,7 @@ pub async fn callback(
                         username: &u.0,
                         service: &slug,
                         perms,
+                        device: None,
                     },
                 )
                 .await
@@ -823,6 +819,7 @@ pub async fn launch(
             username: &user.username,
             service: &svc_slug,
             perms,
+            device: None,
         },
     )
     .await

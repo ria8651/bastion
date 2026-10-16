@@ -179,6 +179,7 @@ h1, h2, h3, h4 { margin: 0; font-weight: 500; }
 .btn.danger { color: var(--fg-mid); border-color: var(--line); }
 .btn.danger:hover { color: var(--fg); border-color: var(--fg-mid); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn.wide { width: 100%; justify-content: center; }
 
 /* ───────── Inputs ───────── */
 .input {
@@ -648,4 +649,19 @@ label.field .input { margin-top: 6px; width: 100%; }
 .error-page .actions {
   display: flex; gap: 8px;
   margin-top: 24px;
+}
+
+/* ───────── Device sign-in ───────── */
+.input.code-input {
+  width: 100%;
+  font-size: 20px;
+  text-align: center;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+.device-code {
+  margin-top: 22px;
+  font-size: 26px;
+  letter-spacing: 0.15em;
+  text-align: center;
 }

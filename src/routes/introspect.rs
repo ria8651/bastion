@@ -72,6 +72,30 @@ pub async fn introspect(State(state): State<AppState>, headers: HeaderMap) -> Re
             .into_response();
     }
 
+    // A device's JWT outlives its revocation by up to its lifetime; this is
+    // the check that doesn't.
+    if let Some(device_id) = claims.get("device_id").and_then(Value::as_i64) {
+        let live: Option<(i64,)> =
+            match sqlx::query_as("SELECT id FROM devices WHERE id = ? AND revoked_at IS NULL")
+                .bind(device_id)
+                .fetch_optional(&state.pool)
+                .await
+            {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::error!(error = ?e, "introspect device lookup");
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "db error").into_response();
+                }
+            };
+        if live.is_none() {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "active": false, "error": "device signed out" })),
+            )
+                .into_response();
+        }
+    }
+
     let svc = claims.get("svc").and_then(Value::as_str).map(String::from);
     let mut granted = false;
     let mut service_id: Option<i64> = None;

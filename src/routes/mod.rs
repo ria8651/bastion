@@ -1,6 +1,7 @@
 pub mod account;
 pub mod admin;
 pub mod auth;
+pub mod device;
 pub mod favicon;
 pub mod home;
 pub mod introspect;

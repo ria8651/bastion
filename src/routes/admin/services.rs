@@ -8,7 +8,8 @@ use maud::{html, Markup};
 use serde::Deserialize;
 
 use super::ui::{
-    back, badge, empty, field, header, section, status_badge, tile, user_avatar, Nav, Post, Tone,
+    back, badge, empty, field, header, section, status_badge, switch, tile, user_avatar, Nav, Post,
+    Tone,
 };
 use super::{admin, ctx, fmt_time, rel_time, ProxyHealth};
 use crate::audit::audit;
@@ -331,6 +332,14 @@ pub async fn service_detail(
             .bind(id)
             .fetch_all(&state.pool)
             .await?;
+            let (device_login, device_count): (bool, i64) = sqlx::query_as(
+                "SELECT device_login, (SELECT COUNT(*) FROM devices
+                                        WHERE service_id = s.id AND revoked_at IS NULL)
+                 FROM services s WHERE id = ?",
+            )
+            .bind(id)
+            .fetch_one(&state.pool)
+            .await?;
             let health = ProxyHealth::load(&state).await?;
             let can_open = uses_token || routes.iter().any(|r| r.3);
             html! {
@@ -408,6 +417,29 @@ pub async fn service_detail(
                         }
                     }
                 }))
+
+                // Devices are handed the same JWT, so this means nothing to a
+                // service that doesn't verify one.
+                @if uses_token || device_login {
+                    (section("Device sign-in", None,
+                        Some(switch("/admin/services/toggle-device-login", &[("id", &id_s)], device_login,
+                            if device_login { "Turn off device sign-in" } else { "Turn on device sign-in" })),
+                        html! {
+                        p.sec-desc {
+                            "Lets apps on devices without a browser, like a TV, sign in with a code that "
+                            "someone confirms on their phone at "
+                            span.mono { "/device" } ". Leave it off unless the service has such a client: "
+                            "anyone can start a pairing, so the confirm page is all that stands between a "
+                            "code sent by a stranger and someone's account."
+                        }
+                        @if device_count > 0 {
+                            p.sec-desc {
+                                (device_count) " paired " (if device_count == 1 { "device" } else { "devices" }) "."
+                                @if !device_login { " They're refused until this is turned back on." }
+                            }
+                        }
+                    }))
+                }
 
                 // Permissions travel in the JWT only. An app reached solely
                 // through a gated route can't register a catalog and is sent
@@ -588,6 +620,38 @@ pub async fn update_service(
 #[derive(Debug, Deserialize)]
 pub struct IdForm {
     pub id: i64,
+}
+
+pub async fn toggle_device_login(
+    State(state): State<AppState>,
+    user: Option<Extension<UserCtx>>,
+    Form(f): Form<IdForm>,
+) -> AppResult<Response> {
+    let admin = admin(user)?;
+    let row: Option<(bool,)> = sqlx::query_as(
+        "UPDATE services SET device_login = NOT device_login
+         WHERE id = ? AND deleted_at IS NULL RETURNING device_login",
+    )
+    .bind(f.id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((on,)) = row else {
+        return Err(AppError::NotFound);
+    };
+    audit(
+        &state.pool,
+        Some(admin.id),
+        if on {
+            "service.device_login_on"
+        } else {
+            "service.device_login_off"
+        },
+        Some(&format!("service:{}", f.id)),
+        None,
+    )
+    .await
+    .map_err(AppError::Other)?;
+    Ok(Redirect::to(&format!("/admin/services/{}", f.id)).into_response())
 }
 
 pub async fn remove_service(

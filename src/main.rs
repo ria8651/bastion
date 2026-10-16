@@ -1,5 +1,6 @@
 mod audit;
 mod db;
+mod device;
 mod edge;
 mod error;
 mod forwarded;
@@ -83,6 +84,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/callback", get(routes::auth::callback))
         .route("/auth/logout", post(routes::auth::logout))
         .route("/launch/:slug", get(routes::auth::launch))
+        // device sign-in
+        .route("/device", get(routes::device::page))
+        .route("/device/approve", post(routes::device::approve))
+        .route("/device/deny", post(routes::device::deny))
         // setup
         .route("/setup", get(routes::setup::page))
         .route(
@@ -106,6 +111,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/account", get(routes::account::page))
         .route("/account/link", post(routes::account::link_post))
         .route("/account/unlink", post(routes::account::unlink_post))
+        .route("/account/devices/revoke", post(routes::device::revoke_own))
         // admin
         .route("/admin", get(routes::admin::overview_page))
         .route("/admin/audit", get(routes::admin::audit_page))
@@ -131,6 +137,10 @@ async fn main() -> anyhow::Result<()> {
             "/admin/users/:id/revoke-sessions",
             post(routes::admin::revoke_sessions),
         )
+        .route(
+            "/admin/users/:id/revoke-device",
+            post(routes::admin::revoke_device),
+        )
         .route("/admin/services", get(routes::admin::services_page))
         .route("/admin/services/new", get(routes::admin::service_new_page))
         .route("/admin/services/:id", get(routes::admin::service_detail))
@@ -142,6 +152,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/admin/services/remove",
             post(routes::admin::remove_service),
+        )
+        .route(
+            "/admin/services/toggle-device-login",
+            post(routes::admin::toggle_device_login),
         )
         .route(
             "/admin/services/approve-registration",
@@ -175,6 +189,8 @@ async fn main() -> anyhow::Result<()> {
         // public api
         .route("/.well-known/jwks.json", get(routes::jwks::jwks))
         .route("/api/introspect", get(routes::introspect::introspect))
+        .route("/api/device/code", post(routes::device::code))
+        .route("/api/device/token", post(routes::device::token))
         .route(
             "/api/services/register",
             post(routes::registration::register),

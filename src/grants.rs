@@ -45,3 +45,30 @@ pub async fn is_granted_slug(
     .await?;
     Ok(row.is_some())
 }
+
+/// File an access request unless one is already open. How a user who isn't
+/// granted shows up in the admin queue, from whichever door they knocked on.
+pub async fn request_access(
+    pool: &SqlitePool,
+    user_id: i64,
+    service_id: i64,
+    note: &str,
+) -> Result<(), sqlx::Error> {
+    let open: Option<(i64,)> = sqlx::query_as(
+        "SELECT id FROM access_requests
+         WHERE user_id = ? AND service_id = ? AND resolved_at IS NULL",
+    )
+    .bind(user_id)
+    .bind(service_id)
+    .fetch_optional(pool)
+    .await?;
+    if open.is_none() {
+        sqlx::query("INSERT INTO access_requests (user_id, service_id, note) VALUES (?, ?, ?)")
+            .bind(user_id)
+            .bind(service_id)
+            .bind(note)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}

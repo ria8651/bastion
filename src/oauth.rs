@@ -53,6 +53,10 @@ pub struct OAuthState {
     /// before use — see `proxy::validate_redirect`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect: Option<String>,
+    /// A device pairing code to return to `/device` with, rather than going
+    /// on into the service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
 }
 
 pub fn generate_state() -> String {
