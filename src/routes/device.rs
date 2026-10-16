@@ -3,7 +3,7 @@
 
 use axum::{
     extract::{Query, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Redirect, Response},
     Extension, Form, Json,
 };
@@ -129,6 +129,14 @@ pub struct DeviceQuery {
 }
 
 pub async fn page(
+    state: State<AppState>,
+    query: Query<DeviceQuery>,
+    user: Option<Extension<UserCtx>>,
+) -> AppResult<Response> {
+    show(state, query, user).await.map(no_framing)
+}
+
+async fn show(
     State(state): State<AppState>,
     Query(q): Query<DeviceQuery>,
     user: Option<Extension<UserCtx>>,
@@ -176,26 +184,36 @@ pub struct DecideForm {
 
 pub async fn approve(
     state: State<AppState>,
+    headers: HeaderMap,
     user: Option<Extension<UserCtx>>,
     form: Form<DecideForm>,
 ) -> AppResult<Response> {
-    decide(state, user, form, true).await
+    decide(state, headers, user, form, true)
+        .await
+        .map(no_framing)
 }
 
 pub async fn deny(
     state: State<AppState>,
+    headers: HeaderMap,
     user: Option<Extension<UserCtx>>,
     form: Form<DecideForm>,
 ) -> AppResult<Response> {
-    decide(state, user, form, false).await
+    decide(state, headers, user, form, false)
+        .await
+        .map(no_framing)
 }
 
 async fn decide(
     State(state): State<AppState>,
+    headers: HeaderMap,
     user: Option<Extension<UserCtx>>,
     Form(f): Form<DecideForm>,
     approve: bool,
 ) -> AppResult<Response> {
+    if !same_origin(&state, &headers) {
+        return Err(AppError::Forbidden);
+    }
     let Some(Extension(user)) = user else {
         return Err(AppError::Unauthorized);
     };
@@ -205,8 +223,14 @@ async fn decide(
     let code = normalize_user_code(&f.code)
         .ok_or_else(|| AppError::BadRequest("not a device code".into()))?;
     // Everything the confirm page checked, checked again: it was rendered
-    // from a GET that may be minutes old.
+    // from a GET that may be minutes old. That includes the wrong-code limit:
+    // a form posted straight here would otherwise be an unlimited way to
+    // guess codes, or to deny other people's.
+    if device::too_many_misses(user.id) {
+        return Ok(enter_code(Some(TOO_MANY), None).into_response());
+    }
     let Some(p) = device::pending(&state.pool, &code).await? else {
+        device::record_miss(user.id);
         return Ok(outcome(
             "Code expired",
             "It was already used, or timed out. Start again on your device.",
@@ -249,6 +273,38 @@ async fn decide(
         outcome("Cancelled", "The device wasn't signed in.")
     }
     .into_response())
+}
+
+/// Approving mints a 90-day credential, so the post has to come from
+/// bastion's own confirm page. `SameSite=Lax` doesn't ensure that: every host
+/// bastion fronts is the same site, so a page on any of them could post here
+/// with the visitor's cookie. Browsers send `Sec-Fetch-Site` (over https) or
+/// at least `Origin` on a POST; a request with neither isn't from a browser,
+/// and so carries no cookie but its sender's own.
+fn same_origin(state: &AppState, headers: &HeaderMap) -> bool {
+    let get = |k| headers.get(k).and_then(|v| v.to_str().ok());
+    if let Some(site) = get("sec-fetch-site") {
+        return site == "same-origin";
+    }
+    match get("origin") {
+        Some(o) => {
+            let own = crate::host::of_url(&origin_from(state, headers));
+            crate::host::of_url(o).is_some_and(|h| Some(h) == own)
+        }
+        None => true,
+    }
+}
+
+/// The confirm page is one click from pairing a device, so no other site may
+/// frame it and steer that click.
+fn no_framing(mut res: Response) -> Response {
+    let h = res.headers_mut();
+    h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("frame-ancestors 'none'"),
+    );
+    res
 }
 
 const NO_MATCH: &str =
@@ -332,8 +388,11 @@ fn confirm(p: &device::Pending, user: &UserCtx) -> Markup {
         "Confirm device",
         html! {
             (banner(p))
-            div.landing-headline { (p.device_name) }
-            div.landing-subline { "wants to sign in to " (p.service_name) " as " (user.username) }
+            div.landing-headline { "Sign in this device?" }
+            div.landing-subline {
+                "a device calling itself “" (p.device_name) "” wants to sign in to "
+                (p.service_name) " as " (user.username)
+            }
             div.device-code.mono { (code) }
             div.landing-footnote {
                 "Only continue if this code is on a screen in front of you."
@@ -343,7 +402,7 @@ fn confirm(p: &device::Pending, user: &UserCtx) -> Markup {
             div.provider-stack {
                 form method="post" action="/device/approve" style="margin:0" {
                     input type="hidden" name="code" value=(code);
-                    button.btn.primary.wide type="submit" { "Sign in " (p.device_name) }
+                    button.btn.primary.wide type="submit" { "Sign in" }
                 }
                 form method="post" action="/device/deny" style="margin:0" {
                     input type="hidden" name="code" value=(code);

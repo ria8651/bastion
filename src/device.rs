@@ -36,13 +36,14 @@ pub const POLL_INTERVAL_SECONDS: i64 = 5;
 /// A device unused for this long has to pair again.
 pub const IDLE_TTL_SECONDS: i64 = 90 * 24 * 60 * 60;
 /// `/api/device/code` is unauthenticated; cap the pairings it can leave open.
+/// Per service, so flooding one can't stop pairing for the others.
 const MAX_PENDING: i64 = 50;
 /// Wrong codes a signed-in user may enter per window before being refused.
 const MAX_MISSES: u32 = 10;
 const MISS_WINDOW_SECONDS: i64 = 10 * 60;
 /// No vowels (no accidental words) and nothing that reads as another
 /// character, per RFC 8628 §6.1. 20^8 ≈ 2.6e10 codes, of which at most
-/// `MAX_PENDING` are live.
+/// `MAX_PENDING` per service are live.
 const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
 const USER_CODE_LEN: usize = 8;
 
@@ -127,11 +128,13 @@ pub fn confirm_path(code: &str) -> String {
 }
 
 /// Whatever the device called itself, made safe to show on a confirm page.
+/// Bidi controls go too: they aren't `is_control`, and a name that renders
+/// backwards is a phishing aid.
 fn clean_name(name: Option<&str>) -> String {
     let n: String = name
         .unwrap_or_default()
         .chars()
-        .filter(|c| !c.is_control())
+        .filter(|c| !c.is_control() && !is_bidi_control(*c))
         .take(64)
         .collect();
     let n = n.trim();
@@ -140,6 +143,10 @@ fn clean_name(name: Option<&str>) -> String {
     } else {
         n.to_string()
     }
+}
+
+fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
 // -------------------- Device side --------------------
@@ -168,9 +175,11 @@ pub async fn start(pool: &SqlitePool, client_id: &str, name: Option<&str>) -> Re
         .bind(now())
         .execute(pool)
         .await?;
-    let (pending,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM device_codes")
-        .fetch_one(pool)
-        .await?;
+    let (pending,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM device_codes WHERE service_id = ?")
+            .bind(service_id)
+            .fetch_one(pool)
+            .await?;
     if pending >= MAX_PENDING {
         return Err(OAuthError::new(
             "slow_down",
@@ -506,14 +515,14 @@ pub fn record_miss(user_id: i64) -> bool {
     misses.retain(|_, (_, since)| now - *since < MISS_WINDOW_SECONDS);
     let entry = misses.entry(user_id).or_insert((0, now));
     entry.0 += 1;
-    entry.0 > MAX_MISSES
+    entry.0 >= MAX_MISSES
 }
 
 pub fn too_many_misses(user_id: i64) -> bool {
     let misses = misses().lock().expect("device misses poisoned");
     misses
         .get(&user_id)
-        .is_some_and(|(n, since)| *n > MAX_MISSES && now() - since < MISS_WINDOW_SECONDS)
+        .is_some_and(|(n, since)| *n >= MAX_MISSES && now() - since < MISS_WINDOW_SECONDS)
 }
 
 /// Kept in memory: a restart forgetting them costs an attacker nothing they
@@ -628,6 +637,7 @@ mod tests {
         assert_eq!(clean_name(None), "Unnamed device");
         assert_eq!(clean_name(Some("  \n ")), "Unnamed device");
         assert_eq!(clean_name(Some("Living\u{0}Room")), "LivingRoom");
+        assert_eq!(clean_name(Some("TV\u{202E}moc.evil")), "TVmoc.evil");
         assert_eq!(clean_name(Some(&"x".repeat(200))).len(), 64);
     }
 

@@ -574,9 +574,13 @@ pub async fn callback(
     }
 
     // Signed in to approve a device: back to its confirm page, which does the
-    // grant check itself.
-    if let Some(code) = stored.device.as_deref() {
-        return Ok(Redirect::to(&crate::device::confirm_path(code)).into_response());
+    // grant check itself. Re-checked: the state cookie is unsigned.
+    if let Some(code) = stored
+        .device
+        .as_deref()
+        .and_then(crate::device::normalize_user_code)
+    {
+        return Ok(Redirect::to(&crate::device::confirm_path(&code)).into_response());
     }
 
     // Active user — if a service redirect, mint a token from the frozen sub anchor.

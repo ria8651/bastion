@@ -101,7 +101,9 @@ For clients with no browser (the binkflix Apple TV app). `src/device.rs` holds t
 - **Refresh re-derives everything.** User active, service live and still `device_login`, grant held, current perms. Nothing is copied at pairing time, so a revocation reaches the device within one JWT lifetime. `/api/introspect` checks `devices.revoked_at` for an instant answer. Losing the grant doesn't revoke the device, so restoring the grant brings it back.
 - **Refresh tokens don't rotate.** A TV that lost a rotation response would be locked out. They're stored hashed, with a 90-day idle expiry.
 - **Codes are single-use, and taking them is atomic.** The approving poll `DELETE … RETURNING`s the `device_codes` row, so two racing polls can't both mint a device.
-- **No unauthenticated code oracle.** Signed out, `/device` only carries the code through login (`OAuthState.device`) and never looks it up. Signed in, wrong codes are counted per user, in memory, and refused past 10 per 10 minutes.
+- **No unauthenticated code oracle.** Signed out, `/device` only carries the code through login (`OAuthState.device`, re-checked in the callback since that cookie is unsigned) and never looks it up. Signed in, wrong codes are counted per user, in memory, on the page and on the approve and deny posts alike. A user is refused after 10 in 10 minutes.
+- **Approve and deny must come from bastion's own page.** `SameSite=Lax` doesn't ensure it, because every host bastion fronts is the same site, so `same_origin()` checks `Sec-Fetch-Site`, falling back to `Origin`. `/device` responses also forbid framing, since the confirm page is one click from a 90-day credential.
+- **The device name is attacker-chosen.** It comes from an unauthenticated request, so control and bidi characters are stripped, and the page says "a device calling itself …". Pending codes are capped at 50 per service, so flooding one service can't block pairing for the others.
 - "Sign out everywhere" on the admin user page revokes devices too.
 
 ## Phase status
